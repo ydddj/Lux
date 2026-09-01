@@ -75,7 +75,7 @@ function LazyLibraryRail({ library, userId }: { library: Library; userId: string
   useEffect(() => {
     const node = ref.current;
     if (!node || typeof IntersectionObserver === "undefined") { setVisible(true); return; }
-    const observer = new IntersectionObserver(([entry]) => { if (entry?.isIntersecting) { setVisible(true); observer.disconnect(); } }, { rootMargin: "500px" });
+    const observer = new IntersectionObserver(([entry]) => { if (entry?.isIntersecting) { setVisible(true); observer.disconnect(); } }, { rootMargin: "120px" });
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
