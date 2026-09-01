@@ -959,7 +959,9 @@ impl CatalogService {
         )
         .await
         {
-            Ok(result) => result?,
+            Ok(result) => {
+                result?;
+            }
             Err(_) => return Ok(Vec::new()),
         }
 
