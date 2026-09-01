@@ -29,10 +29,9 @@ export function HomePage({ user }: { user: LuxUser }) {
     refetchInterval: queryRefreshIntervals.mediaSurface,
     refetchIntervalInBackground: false,
   });
-  const heroReady = !!heroQuery.data;
-  const continueQuery = useQuery({ queryKey: ["home", "continue"], queryFn: () => api.homeContinueWatching(), enabled: !!home.data && heroReady, staleTime: 15_000 });
-  const recommendedQuery = useQuery({ queryKey: ["home", "recommended"], queryFn: () => api.homeRecommended(), enabled: !!home.data && heroReady, staleTime: 15_000 });
-  const recentlyQuery = useQuery({ queryKey: ["home", "recently-added"], queryFn: () => api.homeRecentlyAdded(), enabled: !!home.data && heroReady, staleTime: 15_000 });
+  const continueQuery = useQuery({ queryKey: ["home", "continue"], queryFn: () => api.homeContinueWatching(), enabled: !!home.data, staleTime: 15_000 });
+  const recommendedQuery = useQuery({ queryKey: ["home", "recommended"], queryFn: () => api.homeRecommended(), enabled: !!home.data, staleTime: 15_000 });
+  const recentlyQuery = useQuery({ queryKey: ["home", "recently-added"], queryFn: () => api.homeRecentlyAdded(), enabled: !!home.data, staleTime: 15_000 });
 
   useEffect(() => {
     if (home.data) {
@@ -65,13 +64,13 @@ export function HomePage({ user }: { user: LuxUser }) {
           </section>
         ) : null}
         {accountSettings.showContinueWatching ? <ContinueWatchingRail items={sectionData.continueWatching ?? []} total={sectionData.continueWatchingTotal} /> : null}
-        {libraries.map((library) => <LazyLibraryRail key={`latest-${library.id}`} library={library} ready={heroReady} />)}
+        {libraries.map((library) => <LazyLibraryRail key={`latest-${library.id}`} library={library} />)}
       </div>
     </div>
   );
 }
 
-function LazyLibraryRail({ library, ready }: { library: Library; ready: boolean }) {
+function LazyLibraryRail({ library }: { library: Library }) {
   const ref = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(false);
   useEffect(() => {
@@ -81,7 +80,7 @@ function LazyLibraryRail({ library, ready }: { library: Library; ready: boolean 
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
-  const latest = useQuery({ queryKey: ["home", "latest", library.id], queryFn: () => api.homeLibraryLatest(library.id, 12), enabled: visible && ready, staleTime: 60_000 });
+  const latest = useQuery({ queryKey: ["home", "latest", library.id], queryFn: () => api.homeLibraryLatest(library.id, 12), enabled: visible, staleTime: 60_000 });
   const items = latest.data?.items ?? (visible ? library.latest ?? [] : []);
   return <section ref={ref} aria-label={`最新${library.name}`} style={{ minHeight: items.length ? undefined : 180 }}>{visible ? <MediaRail title={`最新${library.name}`} items={items} linkTo={`/libraries/${library.id}`} /> : <div className="lux-skeleton-row" aria-hidden="true" />}</section>;
 }
