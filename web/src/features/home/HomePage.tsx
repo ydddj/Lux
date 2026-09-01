@@ -79,7 +79,7 @@ function LazyLibraryRail({ library, userId }: { library: Library; userId: string
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
-  const latest = useQuery({ queryKey: ["home", userId, "latest", library.id], queryFn: () => api.homeLibraryLatest(library.id, 12), enabled: visible, staleTime: 60_000 });
+  const latest = useQuery({ queryKey: ["home", userId, "latest", library.id], queryFn: () => api.homeLibraryLatest(library.id, 12), enabled: visible, staleTime: 60_000, refetchInterval: (query) => query.state.data?.items?.length ? false : 5_000 });
   const items = latest.data?.items ?? (visible ? library.latest ?? [] : []);
   return <section ref={ref} aria-label={`最新${library.name}`} style={{ minHeight: items.length ? undefined : 180 }}>{visible ? <MediaRail title={`最新${library.name}`} items={items} linkTo={`/libraries/${library.id}`} /> : <div className="lux-skeleton-row" aria-hidden="true" />}</section>;
 }
