@@ -115,14 +115,8 @@ pub(super) async fn lux_home(
     };
     if query.fast == Some(true) {
         let Some(libraries) = state.libraries.as_ref() else { return StatusCode::SERVICE_UNAVAILABLE.into_response(); };
-        let views = match libraries.list_libraries_for_user(&user_id, &accessible_library_ids).await {
-            Ok(views) => views,
-            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-        };
-        let visible = views.into_iter().map(|view| json!({
-            "id": view.library.id.to_string(), "name": view.library.name,
-            "kind": view.library.kind.as_str(), "coverImageUrl": library_cover_url(&view.library), "latest": []
-        })).collect::<Vec<_>>();
+        let views = match libraries.list_libraries_for_user(&user_id, &accessible_library_ids).await { Ok(views) => views, Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response() };
+        let visible = views.into_iter().map(|view| json!({"id": view.library.id.to_string(), "name": view.library.name, "kind": view.library.kind.as_str(), "coverImageUrl": library_cover_url(&view.library), "latest": []})).collect::<Vec<_>>();
         return Json(json!({"libraries": visible, "recommended": [], "continueWatching": [], "recentlyAdded": []})).into_response();
     }
     let snapshot = match home
@@ -285,20 +279,6 @@ pub(super) async fn lux_home_recommended(headers: HeaderMap, State(state): State
     let Some(database) = state.database.as_ref() else { return StatusCode::SERVICE_UNAVAILABLE.into_response(); };
     match lux_catalog_item_values_by_id(database, &user.id.to_string(), &snapshot.recommended).await {
         Ok(values) => Json(json!({"items": lux_catalog_items_from_values(&snapshot.recommended, &values), "total": snapshot.recommended.len()})).into_response(),
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
-}
-
-pub(super) async fn lux_home_hero(headers: HeaderMap, State(state): State<AppState>) -> Response {
-    let user = match require_web_user(&headers, &state).await { Ok(user) => user, Err(response) => return response };
-    let Some(catalog) = state.catalog.as_ref() else { return StatusCode::SERVICE_UNAVAILABLE.into_response(); };
-    let Some(access) = state.access.as_ref() else { return StatusCode::SERVICE_UNAVAILABLE.into_response(); };
-    let Some(database) = state.database.as_ref() else { return StatusCode::SERVICE_UNAVAILABLE.into_response(); };
-    let principal = AccessPrincipal::new(user.id, user.is_admin);
-    let ids = match access.accessible_library_ids(principal).await { Ok(ids) => ids, Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response() };
-    let page = match catalog.list_recently_added_for_library_ids(&ids, 0, 5).await { Ok(page) => page, Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response() };
-    match lux_catalog_item_values_by_id(database, &user.id.to_string(), &page.items).await {
-        Ok(values) => Json(json!({"items": lux_catalog_items_from_values(&page.items, &values)})).into_response(),
         Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
