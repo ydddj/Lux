@@ -145,7 +145,9 @@ function HeroCarousel({ items, continueWatching }: { items: MediaItem[]; continu
   const safeIndex = items.length ? activeIndex % items.length : 0;
   const item = items[safeIndex];
   const logo = item ? imageUrl(item, "logo") : undefined;
-  const image = item ? imageUrl(item, "fanart") ?? imageUrl(item) : undefined;
+  // Prefer the lightweight thumbnail for the first paint. Large fanart may
+  // invoke remote image processing and should never block the hero.
+  const image = item ? imageUrl(item, "thumb") ?? imageUrl(item, "poster") : undefined;
   const title = item ? mediaTitle(item) : "你的私人影院";
   const titleClassName = logo
     ? "lux-hero-title has-logo"
