@@ -312,8 +312,16 @@ export class LuxApiClient {
   }
 
   home() {
-    return this.request<HomeResponse>("/api/v1/home");
+    return this.request<HomeResponse>("/api/v1/home?includeLatest=false");
   }
+
+  homeLibraryLatest(libraryId: string, limit = 12) {
+    return this.request<PageResponse<MediaItem>>(`/api/v1/home/libraries/${encodeURIComponent(libraryId)}/latest?pageSize=${limit}`);
+  }
+
+  homeContinueWatching() { return this.request<PageResponse<MediaItem>>("/api/v1/home/continue-watching"); }
+  homeRecentlyAdded() { return this.request<PageResponse<MediaItem>>("/api/v1/home/recently-added"); }
+  homeRecommended() { return this.request<PageResponse<MediaItem>>("/api/v1/home/recommended"); }
 
   favorites(page = 1) {
     const params = new URLSearchParams({ page: String(page), pageSize: "24" });

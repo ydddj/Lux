@@ -2,11 +2,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronLeft, ChevronRight, Info, Play } from "lucide-react";
 import { Link } from "react-router-dom";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { HorizontalScrollRail } from "../../components/layout/HorizontalScrollRail";
 import { api } from "../../lib/api/client";
 import { queryKeys, queryRefreshIntervals } from "../../lib/api/query-keys";
-import type { HomeResponse, LuxUser, MediaItem } from "../../lib/api/types";
+import type { HomeResponse, LuxUser, MediaItem, Library } from "../../lib/api/types";
 import { readAccountSettings } from "../account/account-settings";
 import { HERO_CAROUSEL_INTERVAL_MS, heroSlides, heroTitleScale } from "./carousel";
 import { ContinueWatchingRail, imageUrl, LibraryCard, MediaRail, mediaTitle, mediaTypeLabel, playbackPositionTicks, runtimeLabel } from "./media";
@@ -28,6 +28,9 @@ export function HomePage({ user }: { user: LuxUser }) {
     refetchInterval: queryRefreshIntervals.mediaSurface,
     refetchIntervalInBackground: false,
   });
+  const continueQuery = useQuery({ queryKey: ["home", "continue"], queryFn: () => api.homeContinueWatching(), enabled: !!home.data, staleTime: 15_000 });
+  const recommendedQuery = useQuery({ queryKey: ["home", "recommended"], queryFn: () => api.homeRecommended(), enabled: !!home.data, staleTime: 15_000 });
+  const recentlyQuery = useQuery({ queryKey: ["home", "recently-added"], queryFn: () => api.homeRecentlyAdded(), enabled: !!home.data, staleTime: 15_000 });
 
   useEffect(() => {
     if (home.data) {
@@ -43,10 +46,11 @@ export function HomePage({ user }: { user: LuxUser }) {
 
   const data = home.data ?? {};
   const libraries = data.libraries ?? [];
-  const slides = heroSlides(data);
+  const sectionData = { ...data, continueWatching: continueQuery.data?.items ?? data.continueWatching, continueWatchingTotal: continueQuery.data?.total ?? data.continueWatchingTotal, recommended: recommendedQuery.data?.items ?? data.recommended, recentlyAdded: recentlyQuery.data?.items ?? data.recentlyAdded };
+  const slides = heroSlides(sectionData);
   return (
     <div className="lux-home">
-      <HeroCarousel items={slides} continueWatching={data.continueWatching ?? []} />
+      <HeroCarousel items={slides} continueWatching={sectionData.continueWatching ?? []} />
       <div className="lux-home-content">
         {accountSettings.showMediaLibraries ? (
           <section className="lux-section lux-library-section" aria-label="我的媒体库">
@@ -58,11 +62,26 @@ export function HomePage({ user }: { user: LuxUser }) {
             </HorizontalScrollRail>
           </section>
         ) : null}
-        {accountSettings.showContinueWatching ? <ContinueWatchingRail items={data.continueWatching ?? []} total={data.continueWatchingTotal} /> : null}
-        {libraries.map((library) => <MediaRail key={`latest-${library.id}`} title={`最新${library.name}`} items={library.latest ?? []} linkTo={`/libraries/${library.id}`} />)}
+        {accountSettings.showContinueWatching ? <ContinueWatchingRail items={sectionData.continueWatching ?? []} total={sectionData.continueWatchingTotal} /> : null}
+        {libraries.map((library) => <LazyLibraryRail key={`latest-${library.id}`} library={library} />)}
       </div>
     </div>
   );
+}
+
+function LazyLibraryRail({ library }: { library: Library }) {
+  const ref = useRef<HTMLElement>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || typeof IntersectionObserver === "undefined") { setVisible(true); return; }
+    const observer = new IntersectionObserver(([entry]) => { if (entry?.isIntersecting) { setVisible(true); observer.disconnect(); } }, { rootMargin: "500px" });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  const latest = useQuery({ queryKey: ["home", "latest", library.id], queryFn: () => api.homeLibraryLatest(library.id, 12), enabled: visible, staleTime: 60_000 });
+  const items = latest.data?.items ?? (visible ? library.latest ?? [] : []);
+  return <section ref={ref} aria-label={`最新${library.name}`} style={{ minHeight: items.length ? undefined : 180 }}>{visible ? <MediaRail title={`最新${library.name}`} items={items} linkTo={`/libraries/${library.id}`} /> : <div className="lux-skeleton-row" aria-hidden="true" />}</section>;
 }
 
 function homeCacheKey(userId: string) {

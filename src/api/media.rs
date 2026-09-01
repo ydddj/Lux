@@ -82,7 +82,17 @@ pub(super) async fn lux_search(
     }
 }
 
-pub(super) async fn lux_home(headers: HeaderMap, State(state): State<AppState>) -> Response {
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LuxHomeQuery {
+    include_latest: Option<bool>,
+}
+
+pub(super) async fn lux_home(
+    headers: HeaderMap,
+    Query(query): Query<LuxHomeQuery>,
+    State(state): State<AppState>,
+) -> Response {
     let user = match require_web_user(&headers, &state).await {
         Ok(user) => user,
         Err(response) => return response,
@@ -112,12 +122,16 @@ pub(super) async fn lux_home(headers: HeaderMap, State(state): State<AppState>) 
         }
     };
     let accessible_library_ids = accessible_library_ids.into_iter().collect::<HashSet<_>>();
-    let latest_groups = snapshot
-        .latest_groups
-        .iter()
-        .filter(|(library_id, _)| accessible_library_ids.contains(library_id))
-        .cloned()
-        .collect::<Vec<_>>();
+    let latest_groups = if query.include_latest.unwrap_or(true) {
+        snapshot
+            .latest_groups
+            .iter()
+            .filter(|(library_id, _)| accessible_library_ids.contains(library_id))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let latest_items = latest_groups
         .iter()
         .flat_map(|(_, items)| items.iter().cloned())
@@ -159,10 +173,11 @@ pub(super) async fn lux_home(headers: HeaderMap, State(state): State<AppState>) 
             "name": view.library.name,
             "kind": view.library.kind.as_str(),
             "coverImageUrl": library_cover_url(&view.library),
-            "latest": latest_by_library
-                .get(&library_id)
-                .cloned()
-                .unwrap_or_default(),
+            "latest": if query.include_latest.unwrap_or(true) {
+                latest_by_library.get(&library_id).cloned().unwrap_or_default()
+            } else {
+                Vec::new()
+            },
         }));
     }
     Json(json!({
@@ -174,6 +189,91 @@ pub(super) async fn lux_home(headers: HeaderMap, State(state): State<AppState>) 
         "libraries": visible,
     }))
     .into_response()
+}
+
+/// Loads one library shelf independently so the Web client can defer below-the-fold work.
+pub(super) async fn lux_home_library_latest(
+    headers: HeaderMap,
+    Path(library_id): Path<String>,
+    Query(query): Query<LuxPageQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    let user = match require_web_user(&headers, &state).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    let Some(home) = state.home.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Some(database) = state.database.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Some(access) = state.access.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let principal = AccessPrincipal::new(user.id, user.is_admin);
+    let ids = match access.accessible_library_ids(principal).await {
+        Ok(ids) => ids,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    if !ids.iter().any(|id| id == &library_id) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let snapshot = match home.snapshot(principal, ids).await {
+        Ok(value) => value,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let limit = query.page_size.unwrap_or(12).clamp(1, 50) as usize;
+    let items = snapshot
+        .latest_groups
+        .into_iter()
+        .find(|(id, _)| id == &library_id)
+        .map(|(_, items)| items.into_iter().take(limit).collect::<Vec<_>>())
+        .unwrap_or_default();
+    match lux_catalog_item_values_by_id(database, &user.id.to_string(), &items).await {
+        Ok(values) => Json(json!({"items": lux_catalog_items_from_values(&items, &values), "total": items.len()})).into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+async fn home_snapshot_for_user(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<(UserRecord, Arc<HomeSnapshot>), Response> {
+    let user = require_web_user(headers, state).await?;
+    let home = state.home.as_ref().ok_or_else(|| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
+    let access = state.access.as_ref().ok_or_else(|| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
+    let principal = AccessPrincipal::new(user.id, user.is_admin);
+    let ids = access.accessible_library_ids(principal).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
+    let snapshot = home.snapshot(principal, ids).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
+    Ok((user, snapshot))
+}
+
+pub(super) async fn lux_home_continue_watching(headers: HeaderMap, State(state): State<AppState>) -> Response {
+    let (user, snapshot) = match home_snapshot_for_user(&headers, &state).await { Ok(value) => value, Err(response) => return response };
+    let Some(database) = state.database.as_ref() else { return StatusCode::SERVICE_UNAVAILABLE.into_response(); };
+    match lux_catalog_item_values_by_id(database, &user.id.to_string(), &snapshot.continue_watching.items).await {
+        Ok(values) => Json(json!({"items": lux_catalog_items_from_values(&snapshot.continue_watching.items, &values), "total": snapshot.continue_watching.total})).into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+pub(super) async fn lux_home_recently_added(headers: HeaderMap, State(state): State<AppState>) -> Response {
+    let (user, snapshot) = match home_snapshot_for_user(&headers, &state).await { Ok(value) => value, Err(response) => return response };
+    let Some(database) = state.database.as_ref() else { return StatusCode::SERVICE_UNAVAILABLE.into_response(); };
+    match lux_catalog_item_values_by_id(database, &user.id.to_string(), &snapshot.recently_added.items).await {
+        Ok(values) => Json(json!({"items": lux_catalog_items_from_values(&snapshot.recently_added.items, &values), "total": snapshot.recently_added.total})).into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+pub(super) async fn lux_home_recommended(headers: HeaderMap, State(state): State<AppState>) -> Response {
+    let (user, snapshot) = match home_snapshot_for_user(&headers, &state).await { Ok(value) => value, Err(response) => return response };
+    let Some(database) = state.database.as_ref() else { return StatusCode::SERVICE_UNAVAILABLE.into_response(); };
+    match lux_catalog_item_values_by_id(database, &user.id.to_string(), &snapshot.recommended).await {
+        Ok(values) => Json(json!({"items": lux_catalog_items_from_values(&snapshot.recommended, &values), "total": snapshot.recommended.len()})).into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 
 #[derive(Deserialize, Default)]
