@@ -196,6 +196,17 @@ impl HomeService {
         Ok(snapshot)
     }
 
+    pub(crate) async fn latest_for_library(
+        &self,
+        library_id: &str,
+        limit: usize,
+    ) -> Result<Vec<CatalogItem>, HomeError> {
+        let shared = self.shared_snapshot().await?;
+        Ok(shared.latest_groups.iter().find(|(id, _)| id == library_id)
+            .map(|(_, items)| items.iter().take(limit).cloned().collect())
+            .unwrap_or_default())
+    }
+
     pub(crate) fn invalidate(&self) {
         self.inner.generation.fetch_add(1, Ordering::AcqRel);
         self.inner.catalog.invalidate_library_pages();

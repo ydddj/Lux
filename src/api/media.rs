@@ -209,7 +209,7 @@ pub(super) async fn lux_home_library_latest(
         Ok(user) => user,
         Err(response) => return response,
     };
-    let Some(catalog) = state.catalog.as_ref() else {
+    let Some(home) = state.home.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let Some(database) = state.database.as_ref() else {
@@ -226,14 +226,10 @@ pub(super) async fn lux_home_library_latest(
     if !ids.iter().any(|id| id == &library_id) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let groups = match catalog.list_recently_added_light_by_library_ids(&[library_id.clone()], query.page_size.unwrap_or(12).clamp(1, 50)).await {
+    let items = match home.latest_for_library(&library_id, query.page_size.unwrap_or(12).clamp(1, 50) as usize).await {
         Ok(value) => value,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    let limit = query.page_size.unwrap_or(12).clamp(1, 50) as usize;
-    let items = groups.into_iter().find(|(id, _)| id == &library_id)
-        .map(|(_, items)| items.into_iter().take(limit).collect::<Vec<_>>())
-        .unwrap_or_default();
     match lux_catalog_item_values_by_id(database, &user.id.to_string(), &items).await {
         Ok(values) => Json(json!({"items": lux_catalog_items_from_values(&items, &values), "total": items.len()})).into_response(),
         Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
