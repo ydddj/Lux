@@ -23,7 +23,7 @@ const MAX_HOME_CACHE_ENTRIES: usize = 256;
 // Keep the initial aggregate response bounded for installations with many
 // libraries. Individual library pages remain paginated and expose the full
 // catalog when the user opens a library.
-const HOME_LATEST_ITEMS_PER_LIBRARY: i64 = 6;
+const HOME_LATEST_ITEMS_PER_LIBRARY: i64 = 12;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HomeSnapshot {
