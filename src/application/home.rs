@@ -109,6 +109,9 @@ pub(crate) struct HomeService {
 
 impl HomeService {
     pub(crate) fn new(catalog: CatalogService, libraries: LibraryService) -> Self {
+        // Start the potentially expensive all-library recommendation aggregate
+        // refresh before the first user request arrives.
+        catalog.warm_recommendation_stats();
         let (refresh_tx, mut refresh_rx) = mpsc::channel(1);
         let inner = Arc::new(HomeServiceInner {
             catalog,

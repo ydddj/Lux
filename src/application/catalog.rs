@@ -377,6 +377,17 @@ pub struct CatalogItemCounts {
 }
 
 impl CatalogService {
+    /// Refresh recommendation aggregates off the request path so the first
+    /// home page after a restart does not pay the full-library scan cost.
+    pub(crate) fn warm_recommendation_stats(&self) {
+        let database = self.database.clone();
+        tokio::spawn(async move {
+            if let Err(error) = database.refresh_recommendation_stats_if_needed().await {
+                tracing::debug!(%error, "recommendation statistics warm-up failed");
+            }
+        });
+    }
+
     pub fn new(database: Database, access: MediaAccessService) -> Self {
         let search_flights = SearchFlightRegistry::new();
         let library_page_cache =
