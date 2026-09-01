@@ -20,6 +20,10 @@ const HOME_USER_CACHE_TTL: Duration = Duration::from_secs(15);
 const HOME_SHARED_CACHE_TTL: Duration = Duration::from_secs(60);
 const HOME_REFRESH_DEBOUNCE: Duration = Duration::from_secs(2);
 const MAX_HOME_CACHE_ENTRIES: usize = 256;
+// Keep the initial aggregate response bounded for installations with many
+// libraries. Individual library pages remain paginated and expose the full
+// catalog when the user opens a library.
+const HOME_LATEST_ITEMS_PER_LIBRARY: i64 = 6;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HomeSnapshot {
@@ -249,7 +253,10 @@ impl HomeService {
         let latest_groups = self
             .inner
             .catalog
-            .list_recently_added_by_library_ids(&enabled_library_ids, 12)
+            .list_recently_added_by_library_ids(
+                &enabled_library_ids,
+                HOME_LATEST_ITEMS_PER_LIBRARY,
+            )
             .await?;
         let snapshot = Arc::new(HomeSharedSnapshot {
             latest_groups,
