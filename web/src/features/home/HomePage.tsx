@@ -50,7 +50,7 @@ export function HomePage({ user }: { user: LuxUser }) {
   const slides = heroSlides(sectionData);
   return (
     <div className="lux-home">
-      <HeroCarousel items={slides} continueWatching={sectionData.continueWatching ?? []} />
+      {slides.length ? <HeroCarousel items={slides} continueWatching={sectionData.continueWatching ?? []} /> : null}
       <div className="lux-home-content">
         {accountSettings.showMediaLibraries ? (
           <section className="lux-section lux-library-section" aria-label="我的媒体库">
@@ -139,7 +139,7 @@ function HeroCarousel({ items, continueWatching }: { items: MediaItem[]; continu
   const item = items[safeIndex];
   const logo = item ? imageUrl(item, "logo") : undefined;
   const image = item ? imageUrl(item, "fanart") ?? imageUrl(item) : undefined;
-  const title = item ? mediaTitle(item) : "你的私人影院";
+  const title = item ? mediaTitle(item) : "";
   const titleClassName = logo
     ? "lux-hero-title has-logo"
     : `lux-hero-title lux-hero-title--${heroTitleScale(title)}`;

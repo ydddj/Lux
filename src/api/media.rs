@@ -226,7 +226,7 @@ pub(super) async fn lux_home_library_latest(
     if !ids.iter().any(|id| id == &library_id) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let groups = match catalog.list_recently_added_by_library_ids(&[library_id.clone()], query.page_size.unwrap_or(12).clamp(1, 50)).await {
+    let groups = match catalog.list_recently_added_light_by_library_ids(&[library_id.clone()], query.page_size.unwrap_or(12).clamp(1, 50)).await {
         Ok(value) => value,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };

@@ -921,6 +921,20 @@ impl CatalogService {
         Ok(grouped.into_iter().collect())
     }
 
+    /// Lightweight shelf query used by the home page. Episode counts are
+    /// intentionally omitted; they are not needed for the first paint.
+    pub(crate) async fn list_recently_added_light_by_library_ids(
+        &self,
+        library_ids: &[String],
+        limit: i64,
+    ) -> Result<Vec<(String, Vec<CatalogItem>)>, CatalogError> {
+        let rows = self.database.list_recent_catalog_rows_by_library(library_ids, limit).await?;
+        let items = assemble_items(rows);
+        let mut grouped = BTreeMap::<String, Vec<CatalogItem>>::new();
+        for item in items { grouped.entry(item.library_id.clone()).or_default().push(item); }
+        Ok(grouped.into_iter().collect())
+    }
+
     pub async fn list_recommended(
         &self,
         principal: AccessPrincipal,
