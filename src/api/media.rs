@@ -299,12 +299,9 @@ pub(super) async fn lux_home_hero(headers: HeaderMap, State(state): State<AppSta
     let hero_library_ids = ids.into_iter().take(1).collect::<Vec<_>>();
     let page = match tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        catalog.list_recently_added_by_library_ids(&hero_library_ids, 5),
+        catalog.list_recently_added_for_library_ids(&hero_library_ids, 0, 5),
     ).await {
-        Ok(Ok(groups)) => {
-            let items = groups.into_iter().flat_map(|(_, items)| items).collect::<Vec<_>>();
-            CatalogPage { total: items.len() as i64, offset: 0, limit: 5, items }
-        }
+        Ok(Ok(page)) => page,
         Ok(Err(_)) | Err(_) => return Json(json!({"items": []})).into_response(),
     };
     match lux_catalog_item_values_by_id(database, &user.id.to_string(), &page.items).await {
