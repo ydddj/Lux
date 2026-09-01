@@ -19,14 +19,7 @@ export function HomePage({ user }: { user: LuxUser }) {
   const queryClient = useQueryClient();
   const accountSettings = useMemo(() => readAccountSettings(user.id), [user.id]);
   const cachedHome = useMemo(() => readHomeCache(user.id), [user.id]);
-  const librariesQuery = useQuery({ queryKey: queryKeys.libraries, queryFn: () => api.libraries(), staleTime: 60_000 });
-  const heroQuery = useQuery({
-    queryKey: ["home", "hero"],
-    queryFn: async () => {
-      try { return await api.homeHero(); } catch { return await api.homeRecentlyAdded(); }
-    },
-    staleTime: 60_000,
-  });
+  const heroQuery = useQuery({ queryKey: ["home", "hero"], queryFn: () => api.homeHero(), staleTime: 60_000 });
   const home = useQuery({
     queryKey: queryKeys.home,
     queryFn: () => api.home(),
@@ -54,7 +47,7 @@ export function HomePage({ user }: { user: LuxUser }) {
   if (home.error && !home.data) return <section className="lux-page-state"><h1>首页加载失败</h1><p>{home.error.message}</p></section>;
 
   const data = home.data ?? {};
-  const libraries = data.libraries?.length ? data.libraries : librariesQuery.data?.libraries ?? [];
+  const libraries = data.libraries ?? [];
   const sectionData = { ...data, continueWatching: continueQuery.data?.items ?? data.continueWatching, continueWatchingTotal: continueQuery.data?.total ?? data.continueWatchingTotal, recommended: recommendedQuery.data?.items ?? data.recommended, recentlyAdded: recentlyQuery.data?.items ?? data.recentlyAdded };
   const slides = heroSlides(sectionData);
   return (
