@@ -22,9 +22,7 @@ export function HomePage({ user }: { user: LuxUser }) {
   const librariesQuery = useQuery({ queryKey: queryKeys.libraries, queryFn: () => api.libraries(), staleTime: 60_000 });
   const heroQuery = useQuery({
     queryKey: ["home", "hero"],
-    queryFn: async () => {
-      try { return await api.homeHero(); } catch { return await api.homeRecentlyAdded(); }
-    },
+    queryFn: () => api.homeHero(),
     staleTime: 60_000,
   });
   const home = useQuery({
