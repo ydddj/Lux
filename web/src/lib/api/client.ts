@@ -322,6 +322,7 @@ export class LuxApiClient {
   homeContinueWatching() { return this.request<PageResponse<MediaItem>>("/api/v1/home/continue-watching"); }
   homeRecentlyAdded() { return this.request<PageResponse<MediaItem>>("/api/v1/home/recently-added"); }
   homeRecommended() { return this.request<PageResponse<MediaItem>>("/api/v1/home/recommended"); }
+  homeHero() { return this.request<PageResponse<MediaItem>>("/api/v1/home/hero"); }
 
   favorites(page = 1) {
     const params = new URLSearchParams({ page: String(page), pageSize: "24" });
