@@ -86,6 +86,7 @@ pub(super) async fn lux_search(
 #[serde(rename_all = "camelCase")]
 pub(super) struct LuxHomeQuery {
     include_latest: Option<bool>,
+    fast: Option<bool>,
 }
 
 pub(super) async fn lux_home(
@@ -112,6 +113,18 @@ pub(super) async fn lux_home(
         Ok(ids) => ids,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
+    if query.fast == Some(true) {
+        let Some(libraries) = state.libraries.as_ref() else { return StatusCode::SERVICE_UNAVAILABLE.into_response(); };
+        let views = match libraries.list_libraries_for_user(&user_id, &accessible_library_ids).await {
+            Ok(views) => views,
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        let visible = views.into_iter().map(|view| json!({
+            "id": view.library.id.to_string(), "name": view.library.name,
+            "kind": view.library.kind.as_str(), "coverImageUrl": library_cover_url(&view.library), "latest": []
+        })).collect::<Vec<_>>();
+        return Json(json!({"libraries": visible, "recommended": [], "continueWatching": [], "recentlyAdded": []})).into_response();
+    }
     let snapshot = match home
         .snapshot(principal, accessible_library_ids.clone())
         .await

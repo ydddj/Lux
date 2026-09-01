@@ -312,7 +312,7 @@ export class LuxApiClient {
   }
 
   home() {
-    return this.request<HomeResponse>("/api/v1/home?includeLatest=false");
+    return this.request<HomeResponse>("/api/v1/home?fast=true");
   }
 
   homeLibraryLatest(libraryId: string, limit = 12) {
