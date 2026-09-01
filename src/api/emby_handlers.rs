@@ -1,5 +1,10 @@
 use super::*;
 
+use quick_xml::{Reader, escape::unescape, events::Event};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+use crate::domain::ids::UserId;
+
 #[derive(Deserialize, Default)]
 pub(super) struct DanmakuQuery {
     #[serde(
@@ -208,7 +213,14 @@ pub(super) async fn emby_public_users(State(state): State<AppState>) -> Json<Val
     Json(Value::Array(
         users
             .iter()
-            .map(|user| emby_user_json(user, &server_id, &server_name, &[]))
+            .map(|user| {
+                emby_user_json(
+                    user,
+                    &server_id,
+                    &server_name,
+                    emby_user_configuration_json(&[]),
+                )
+            })
             .collect(),
     ))
 }
@@ -236,7 +248,14 @@ pub(super) async fn emby_users(
     Json(Value::Array(
         users
             .iter()
-            .map(|user| emby_user_json(user, &state.server_id, &server_name, &[]))
+            .map(|user| {
+                emby_user_json(
+                    user,
+                    &state.server_id,
+                    &server_name,
+                    emby_user_configuration_json(&[]),
+                )
+            })
             .collect(),
     ))
     .into_response()
@@ -252,18 +271,863 @@ pub(super) async fn emby_user(
         Ok(user) => user,
         Err(status) => return status.into_response(),
     };
-    if let Err(status) = ensure_emby_user_scope(&user, &user_id) {
-        return status.into_response();
+    if user_id.parse::<UserId>().is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
     }
+    let user = if user.id.to_string() == user_id {
+        user
+    } else {
+        if !user.can_manage_server {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        let Some(auth) = state.emby_auth.as_ref() else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        match auth.user_by_id(&user_id).await {
+            Ok(Some(user)) => user,
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    };
     let server_name = current_emby_server_name(&state).await;
     let ordered_views = emby_ordered_views(&state, &user).await;
+    let configuration = emby_user_configuration(&state, &user, &ordered_views).await;
     Json(emby_user_json(
         &user,
         &state.server_id,
         &server_name,
-        &ordered_views,
+        configuration,
     ))
     .into_response()
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub(super) struct EmbyCreateUserRequest {
+    name: Option<String>,
+    copy_from_user_id: Option<String>,
+    user_copy_options: Option<Vec<String>>,
+}
+
+pub(super) async fn emby_create_user(
+    headers: HeaderMap,
+    Query(query): Query<EmbyTokenQuery>,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Response {
+    let request = match parse_emby_create_user_request(&headers, &body) {
+        Ok(request) => request,
+        Err(status) => return status.into_response(),
+    };
+    let acting_user = match require_emby_user(&headers, &state, query.api_key.as_deref()).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !acting_user.can_manage_server {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(name) = request
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(database) = state.database.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let users = match UserStore::new(database.clone()) {
+        Ok(users) => users,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let source = if let Some(source_id) = request.copy_from_user_id.as_deref() {
+        if source_id.parse::<UserId>().is_err() {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        let Some(auth) = state.emby_auth.as_ref() else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        match auth.user_by_id(source_id).await {
+            Ok(Some(source)) => Some(source),
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    } else {
+        None
+    };
+    let copy_policy = source.is_some()
+        && request
+            .user_copy_options
+            .as_deref()
+            .is_some_and(|options| has_emby_copy_option(options, "UserPolicy"));
+    let copy_configuration = source.is_some()
+        && request
+            .user_copy_options
+            .as_deref()
+            .is_some_and(|options| has_emby_copy_option(options, "UserConfiguration"));
+    let mut created = match users
+        .create_user_without_password(
+            name,
+            name,
+            copy_policy && source.as_ref().is_some_and(|user| user.is_admin),
+        )
+        .await
+    {
+        Ok(user) => user,
+        Err(UserStoreError::InvalidUsername) => return StatusCode::BAD_REQUEST.into_response(),
+        Err(UserStoreError::Storage(error)) if error.is_unique_violation() => {
+            return StatusCode::CONFLICT.into_response();
+        }
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    if copy_policy {
+        let Some(source) = source.as_ref() else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        created = match users
+            .update_user(
+                &created.id.to_string(),
+                UserUpdate {
+                    is_admin: Some(source.is_admin),
+                    can_manage_server: Some(source.can_manage_server),
+                    is_disabled: Some(source.is_disabled),
+                    can_remote_access: Some(source.can_remote_access),
+                    can_download: Some(source.can_download),
+                    ..UserUpdate::default()
+                },
+            )
+            .await
+        {
+            Ok(Some(user)) => user,
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(UserStoreError::LastManager) => return StatusCode::CONFLICT.into_response(),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+    }
+    if copy_configuration {
+        let Some(source) = source.as_ref() else {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        };
+        let source_id = source.id.to_string();
+        let target_id = created.id.to_string();
+        if let Err(error) = database
+            .copy_user_library_settings(&source_id, &target_id)
+            .await
+        {
+            tracing::error!(error = %error, "failed to copy emby user library settings");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        if let Ok(Some(configuration)) = database.find_user_emby_configuration(&source_id).await {
+            if let Err(error) = database
+                .set_user_emby_configuration(&target_id, &configuration)
+                .await
+            {
+                tracing::error!(error = %error, "failed to copy emby user configuration");
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+        }
+        created = match users.find_by_id(&target_id).await {
+            Ok(Some(user)) => user,
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+    }
+    let server_name = current_emby_server_name(&state).await;
+    let ordered_views = emby_ordered_views(&state, &created).await;
+    let configuration = emby_user_configuration(&state, &created, &ordered_views).await;
+    Json(emby_user_json(
+        &created,
+        &state.server_id,
+        &server_name,
+        configuration,
+    ))
+    .into_response()
+}
+
+pub(super) async fn emby_delete_user(
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    Query(query): Query<EmbyTokenQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    if user_id.parse::<UserId>().is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let acting_user = match require_emby_user(&headers, &state, query.api_key.as_deref()).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !acting_user.can_manage_server {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(database) = state.database.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let users = match UserStore::new(database.clone()) {
+        Ok(users) => users,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    if let Some(avatars) = state.user_avatars.as_ref() {
+        let Ok(target_user_id) = user_id.parse::<UserId>() else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        if avatars.remove(target_user_id).await.is_err() {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    }
+    match users.delete_user(&user_id).await {
+        Ok(true) => StatusCode::OK.into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(UserStoreError::LastManager) => StatusCode::CONFLICT.into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub(super) struct EmbyUserUpdateRequest {
+    id: Option<String>,
+    name: Option<String>,
+    configuration: Option<Value>,
+    policy: Option<EmbyUserPolicyRequest>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub(super) struct EmbyUserPolicyRequest {
+    is_administrator: Option<bool>,
+    is_disabled: Option<bool>,
+    enable_remote_access: Option<bool>,
+    enable_content_downloading: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub(super) struct EmbyUpdateUserPasswordRequest {
+    id: Option<String>,
+    current_pw: Option<String>,
+    new_pw: Option<String>,
+    reset_password: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+pub(super) struct EmbyUserImageQuery {
+    #[serde(flatten)]
+    auth: EmbyTokenQuery,
+    #[serde(rename = "Index", alias = "index")]
+    index: Option<i32>,
+}
+
+fn emby_request_content_type(headers: &HeaderMap) -> &str {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .unwrap_or_default()
+}
+
+fn parse_emby_xml_fields(body: &[u8]) -> Result<HashMap<String, String>, StatusCode> {
+    let mut reader = Reader::from_reader(body);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut stack = Vec::new();
+    let mut fields = HashMap::new();
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element)) => {
+                stack.push(xml_element_name(element.name().as_ref())?);
+            }
+            Ok(Event::Empty(element)) => {
+                fields.insert(xml_element_name(element.name().as_ref())?, String::new());
+            }
+            Ok(Event::Text(text)) => {
+                if let Some(field) = stack.last() {
+                    let decoded = text.decode().map_err(|_| StatusCode::BAD_REQUEST)?;
+                    let value = unescape(decoded.as_ref())
+                        .map_err(|_| StatusCode::BAD_REQUEST)?
+                        .into_owned();
+                    fields.insert(field.clone(), value);
+                }
+            }
+            Ok(Event::CData(text)) => {
+                if let Some(field) = stack.last() {
+                    let value = text
+                        .decode()
+                        .map_err(|_| StatusCode::BAD_REQUEST)?
+                        .into_owned();
+                    fields.insert(field.clone(), value);
+                }
+            }
+            Ok(Event::End(_)) => {
+                if stack.pop().is_none() {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(
+                Event::Decl(_)
+                | Event::Comment(_)
+                | Event::PI(_)
+                | Event::DocType(_)
+                | Event::GeneralRef(_),
+            ) => {}
+            Err(_) => return Err(StatusCode::BAD_REQUEST),
+        }
+        buffer.clear();
+    }
+
+    if stack.is_empty() {
+        Ok(fields)
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
+
+fn xml_element_name(name: &[u8]) -> Result<String, StatusCode> {
+    let name = std::str::from_utf8(name).map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(name.rsplit(':').next().unwrap_or(name).to_owned())
+}
+
+fn xml_optional_bool(
+    fields: &HashMap<String, String>,
+    name: &str,
+) -> Result<Option<bool>, StatusCode> {
+    let Some(value) = fields.get(name) else {
+        return Ok(None);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" => Ok(Some(true)),
+        "false" | "0" => Ok(Some(false)),
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+fn parse_emby_user_update_request(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<EmbyUserUpdateRequest, StatusCode> {
+    match emby_request_content_type(headers) {
+        "application/json" => serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST),
+        "application/xml" | "text/xml" => {
+            let fields = parse_emby_xml_fields(body)?;
+            Ok(EmbyUserUpdateRequest {
+                id: fields.get("Id").cloned(),
+                name: fields.get("Name").cloned(),
+                configuration: None,
+                policy: None,
+            })
+        }
+        _ => Err(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+    }
+}
+
+fn parse_emby_create_user_request(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<EmbyCreateUserRequest, StatusCode> {
+    match emby_request_content_type(headers) {
+        "application/json" => serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST),
+        "application/xml" | "text/xml" => {
+            let fields = parse_emby_xml_fields(body)?;
+            let user_copy_options = fields.get("UserCopyOptions").map(|value| {
+                value
+                    .split([',', ';'])
+                    .map(str::trim)
+                    .filter(|option| !option.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            });
+            Ok(EmbyCreateUserRequest {
+                name: fields.get("Name").cloned(),
+                copy_from_user_id: fields.get("CopyFromUserId").cloned(),
+                user_copy_options,
+            })
+        }
+        _ => Err(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+    }
+}
+
+fn has_emby_copy_option(options: &[String], requested: &str) -> bool {
+    options
+        .iter()
+        .any(|option| option.trim().eq_ignore_ascii_case(requested))
+}
+
+fn parse_emby_user_policy_request(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<EmbyUserPolicyRequest, StatusCode> {
+    match emby_request_content_type(headers) {
+        "application/json" => serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST),
+        "application/xml" | "text/xml" => {
+            let fields = parse_emby_xml_fields(body)?;
+            Ok(EmbyUserPolicyRequest {
+                is_administrator: xml_optional_bool(&fields, "IsAdministrator")?,
+                is_disabled: xml_optional_bool(&fields, "IsDisabled")?,
+                enable_remote_access: xml_optional_bool(&fields, "EnableRemoteAccess")?,
+                enable_content_downloading: xml_optional_bool(&fields, "EnableContentDownloading")?,
+            })
+        }
+        _ => Err(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+    }
+}
+
+fn parse_emby_password_request(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<EmbyUpdateUserPasswordRequest, StatusCode> {
+    match emby_request_content_type(headers) {
+        "application/json" => serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST),
+        "application/xml" | "text/xml" => {
+            let fields = parse_emby_xml_fields(body)?;
+            Ok(EmbyUpdateUserPasswordRequest {
+                id: fields.get("Id").cloned(),
+                current_pw: fields.get("CurrentPw").cloned(),
+                new_pw: fields.get("NewPw").cloned(),
+                reset_password: xml_optional_bool(&fields, "ResetPassword")?,
+            })
+        }
+        _ => Err(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+    }
+}
+
+fn check_emby_target_id(body_id: Option<&str>, path_id: &str) -> Result<(), StatusCode> {
+    if body_id.is_some_and(|body_id| body_id != path_id) || path_id.parse::<UserId>().is_err() {
+        Err(StatusCode::BAD_REQUEST)
+    } else {
+        Ok(())
+    }
+}
+
+fn check_emby_image_index(index: Option<i32>) -> Result<(), StatusCode> {
+    match index {
+        None | Some(0) => Ok(()),
+        Some(index) if index < 0 => Err(StatusCode::BAD_REQUEST),
+        Some(_) => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+fn check_primary_user_image(image_type: &str) -> Result<(), StatusCode> {
+    if image_type.eq_ignore_ascii_case("Primary") {
+        Ok(())
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
+pub(super) async fn emby_update_user(
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    Query(query): Query<EmbyTokenQuery>,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Response {
+    let request = match parse_emby_user_update_request(&headers, &body) {
+        Ok(request) => request,
+        Err(status) => return status.into_response(),
+    };
+    if let Err(status) = check_emby_target_id(request.id.as_deref(), &user_id) {
+        return status.into_response();
+    }
+    let acting_user = match require_emby_user(&headers, &state, query.api_key.as_deref()).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !acting_user.can_manage_server && acting_user.id.to_string() != user_id {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if request.policy.is_some() && !acting_user.can_manage_server {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(database) = state.database.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let users = match UserStore::new(database.clone()) {
+        Ok(users) => users,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    if request
+        .name
+        .as_deref()
+        .is_some_and(|name| name.trim().is_empty())
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if request
+        .configuration
+        .as_ref()
+        .is_some_and(|configuration| !configuration.is_object())
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let policy = request.policy.as_ref();
+    match users
+        .update_user(
+            &user_id,
+            UserUpdate {
+                display_name: request.name.as_deref(),
+                is_admin: policy.and_then(|policy| policy.is_administrator),
+                can_manage_server: policy.and_then(|policy| policy.is_administrator),
+                is_disabled: policy.and_then(|policy| policy.is_disabled),
+                can_remote_access: policy.and_then(|policy| policy.enable_remote_access),
+                can_download: policy.and_then(|policy| policy.enable_content_downloading),
+                ..UserUpdate::default()
+            },
+        )
+        .await
+    {
+        Ok(Some(user)) => {
+            if let Some(incoming) = request.configuration {
+                let ordered_views = emby_ordered_views(&state, &user).await;
+                let mut configuration =
+                    emby_user_configuration(&state, &user, &ordered_views).await;
+                merge_emby_json_object(&mut configuration, incoming);
+                let Ok(serialized) = serde_json::to_string(&configuration) else {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                };
+                if let Err(error) = database
+                    .set_user_emby_configuration(&user_id, &serialized)
+                    .await
+                {
+                    tracing::error!(error = %error, "failed to persist emby user configuration");
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+            }
+            StatusCode::OK.into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(UserStoreError::LastManager) => StatusCode::CONFLICT.into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+pub(super) async fn emby_update_user_policy(
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    Query(query): Query<EmbyTokenQuery>,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Response {
+    let request = match parse_emby_user_policy_request(&headers, &body) {
+        Ok(request) => request,
+        Err(status) => return status.into_response(),
+    };
+    if let Err(status) = check_emby_target_id(None, &user_id) {
+        return status.into_response();
+    }
+    let acting_user = match require_emby_user(&headers, &state, query.api_key.as_deref()).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !acting_user.can_manage_server {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(database) = state.database.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let users = match UserStore::new(database.clone()) {
+        Ok(users) => users,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    match users
+        .update_user(
+            &user_id,
+            UserUpdate {
+                is_admin: request.is_administrator,
+                can_manage_server: request.is_administrator,
+                is_disabled: request.is_disabled,
+                can_remote_access: request.enable_remote_access,
+                can_download: request.enable_content_downloading,
+                ..UserUpdate::default()
+            },
+        )
+        .await
+    {
+        Ok(Some(_)) => StatusCode::OK.into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(UserStoreError::LastManager) => StatusCode::CONFLICT.into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+pub(super) async fn emby_update_user_password(
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    Query(query): Query<EmbyTokenQuery>,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Response {
+    let request = match parse_emby_password_request(&headers, &body) {
+        Ok(request) => request,
+        Err(status) => return status.into_response(),
+    };
+    if let Err(status) = check_emby_target_id(request.id.as_deref(), &user_id) {
+        return status.into_response();
+    }
+    let acting_user = match require_emby_user(&headers, &state, query.api_key.as_deref()).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !acting_user.can_manage_server && acting_user.id.to_string() != user_id {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(new_password) = request.new_pw.as_deref() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if new_password.is_empty() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(database) = state.database.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let users = match UserStore::new(database.clone()) {
+        Ok(users) => users,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    if let Some(current_password) = request.current_pw.as_deref() {
+        match users
+            .authenticate(&acting_user.username_normalized, current_password)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => return StatusCode::FORBIDDEN.into_response(),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    }
+    let _ = request.reset_password;
+    match users
+        .update_user(
+            &user_id,
+            UserUpdate {
+                password: Some(new_password),
+                ..UserUpdate::default()
+            },
+        )
+        .await
+    {
+        Ok(Some(_)) => StatusCode::OK.into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(UserStoreError::LastManager) => StatusCode::CONFLICT.into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+async fn emby_user_avatar_response(
+    image_type: &str,
+    user_id: &str,
+    index: Option<i32>,
+    state: &AppState,
+    head_only: bool,
+) -> Response {
+    if let Err(status) = check_primary_user_image(image_type)
+        .and_then(|_| check_emby_target_id(None, user_id))
+        .and_then(|_| check_emby_image_index(index))
+    {
+        return status.into_response();
+    }
+    let Some(avatars) = state.user_avatars.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Some(target_user_id) = user_id.parse::<UserId>().ok() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match avatars.load(target_user_id).await {
+        Ok(Some(avatar)) => {
+            let builder = Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, avatar.content_type)
+                .header(CACHE_CONTROL, "private, no-cache")
+                .header("Content-Length", avatar.bytes.len().to_string());
+            let body = if head_only {
+                Body::empty()
+            } else {
+                Body::from(avatar.bytes)
+            };
+            builder
+                .body(body)
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+pub(super) async fn emby_user_avatar(
+    Path((user_id, image_type)): Path<(String, String)>,
+    Query(query): Query<EmbyUserImageQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    let _ = query.auth;
+    emby_user_avatar_response(&image_type, &user_id, query.index, &state, false).await
+}
+
+pub(super) async fn emby_user_avatar_head(
+    Path((user_id, image_type)): Path<(String, String)>,
+    Query(query): Query<EmbyUserImageQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    let _ = query.auth;
+    emby_user_avatar_response(&image_type, &user_id, query.index, &state, true).await
+}
+
+async fn update_emby_user_avatar(
+    headers: HeaderMap,
+    user_id: String,
+    image_type: String,
+    query: EmbyUserImageQuery,
+    state: AppState,
+    body: Bytes,
+    index: Option<i32>,
+) -> Response {
+    if let Err(status) = check_primary_user_image(&image_type)
+        .and_then(|_| check_emby_target_id(None, &user_id))
+        .and_then(|_| check_emby_image_index(index))
+    {
+        return status.into_response();
+    }
+    let user = match require_emby_user(&headers, &state, query.auth.api_key.as_deref()).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !user.can_manage_server && user.id.to_string() != user_id {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(avatars) = state.user_avatars.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    match avatars
+        .store(
+            match user_id.parse::<UserId>() {
+                Ok(user_id) => user_id,
+                Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+            },
+            content_type,
+            &body,
+        )
+        .await
+    {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(UserAvatarError::UnsupportedContentType | UserAvatarError::InvalidContent) => {
+            StatusCode::BAD_REQUEST.into_response()
+        }
+        Err(UserAvatarError::TooLarge { .. }) => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        Err(UserAvatarError::InvalidPath(_) | UserAvatarError::Io { .. }) => {
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+    }
+}
+
+pub(super) async fn emby_update_user_avatar(
+    headers: HeaderMap,
+    Path((user_id, image_type)): Path<(String, String)>,
+    Query(query): Query<EmbyUserImageQuery>,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Response {
+    let index = query.index;
+    update_emby_user_avatar(headers, user_id, image_type, query, state, body, index).await
+}
+
+pub(super) async fn emby_user_avatar_at_index(
+    Path((user_id, image_type, image_index)): Path<(String, String, i32)>,
+    Query(_query): Query<EmbyUserImageQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    emby_user_avatar_response(&image_type, &user_id, Some(image_index), &state, false).await
+}
+
+pub(super) async fn emby_user_avatar_at_index_head(
+    Path((user_id, image_type, image_index)): Path<(String, String, i32)>,
+    Query(_query): Query<EmbyUserImageQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    emby_user_avatar_response(&image_type, &user_id, Some(image_index), &state, true).await
+}
+
+pub(super) async fn emby_update_user_avatar_at_index(
+    headers: HeaderMap,
+    Path((user_id, image_type, image_index)): Path<(String, String, i32)>,
+    Query(query): Query<EmbyUserImageQuery>,
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Response {
+    update_emby_user_avatar(
+        headers,
+        user_id,
+        image_type,
+        query,
+        state,
+        body,
+        Some(image_index),
+    )
+    .await
+}
+
+pub(super) async fn emby_delete_user_avatar_at_index(
+    headers: HeaderMap,
+    Path((user_id, image_type, image_index)): Path<(String, String, i32)>,
+    Query(query): Query<EmbyUserImageQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    delete_emby_user_avatar(
+        headers,
+        user_id,
+        image_type,
+        query,
+        state,
+        Some(image_index),
+    )
+    .await
+}
+
+async fn delete_emby_user_avatar(
+    headers: HeaderMap,
+    user_id: String,
+    image_type: String,
+    query: EmbyUserImageQuery,
+    state: AppState,
+    index: Option<i32>,
+) -> Response {
+    if let Err(status) = check_primary_user_image(&image_type)
+        .and_then(|_| check_emby_target_id(None, &user_id))
+        .and_then(|_| check_emby_image_index(index))
+    {
+        return status.into_response();
+    }
+    let user = match require_emby_user(&headers, &state, query.auth.api_key.as_deref()).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !user.can_manage_server && user.id.to_string() != user_id {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(avatars) = state.user_avatars.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Some(target_user_id) = user_id.parse::<UserId>().ok() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match avatars.remove(target_user_id).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+pub(super) async fn emby_delete_user_avatar(
+    headers: HeaderMap,
+    Path((user_id, image_type)): Path<(String, String)>,
+    Query(query): Query<EmbyUserImageQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    let index = query.index;
+    delete_emby_user_avatar(headers, user_id, image_type, query, state, index).await
 }
 
 pub(super) async fn emby_ordered_views(state: &AppState, user: &UserRecord) -> Vec<String> {
@@ -337,8 +1201,14 @@ pub(super) async fn emby_authenticate(
             .await;
             let server_name = current_emby_server_name(&state).await;
             let ordered_views = emby_ordered_views(&state, &result.user).await;
+            let configuration = emby_user_configuration(&state, &result.user, &ordered_views).await;
             Json(json!({
-                "User": emby_user_json(&result.user, &state.server_id, &server_name, &ordered_views),
+                "User": emby_user_json(
+                    &result.user,
+                    &state.server_id,
+                    &server_name,
+                    configuration,
+                ),
                 "SessionInfo": emby_login_session_json(&result, &state.server_id),
                 "AccessToken": result.token,
                 "ServerId": state.server_id
@@ -401,6 +1271,8 @@ pub(super) struct EmbyTokenQuery {
     pub(super) tag: Option<String>,
     #[serde(rename = "Fields", default)]
     pub(super) fields: Option<String>,
+    #[serde(rename = "ActiveWithinSeconds", alias = "activeWithinSeconds", default)]
+    pub(super) active_within_seconds: Option<i64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -578,6 +1450,7 @@ pub(super) async fn require_emby_user(
         api_key: api_key.map(str::to_owned),
         tag: None,
         fields: None,
+        active_within_seconds: None,
     };
     require_emby_user_with_query(headers, state, &query).await
 }
@@ -627,22 +1500,60 @@ fn emby_user_json(
     user: &UserRecord,
     server_id: &str,
     server_name: &str,
-    ordered_views: &[String],
+    configuration: Value,
 ) -> Value {
     json!({
         "Id": user.id.to_string(),
         "ServerId": server_id,
         "ServerName": server_name,
         "Name": user.display_name,
-        "HasPassword": true,
-        "HasConfiguredPassword": true,
+        "HasPassword": user.has_password,
+        "HasConfiguredPassword": user.has_password,
         "HasConfiguredEasyPassword": false,
         "EnableAutoLogin": false,
-        "LastLoginDate": "1970-01-01T00:00:00.0000000Z",
-        "LastActivityDate": "1970-01-01T00:00:00.0000000Z",
-        "Configuration": emby_user_configuration_json(ordered_views),
+        "LastLoginDate": emby_user_date(user.last_login_at),
+        "LastActivityDate": emby_user_date(user.last_activity_at),
+        "Configuration": configuration,
         "Policy": emby_user_policy_json(user),
     })
+}
+
+fn emby_user_date(timestamp: Option<i64>) -> Value {
+    timestamp
+        .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
+        .and_then(|timestamp| timestamp.format(&Rfc3339).ok())
+        .map_or(Value::Null, Value::String)
+}
+
+async fn emby_user_configuration(
+    state: &AppState,
+    user: &UserRecord,
+    ordered_views: &[String],
+) -> Value {
+    let mut configuration = emby_user_configuration_json(ordered_views);
+    let Some(database) = state.database.as_ref() else {
+        return configuration;
+    };
+    let Ok(Some(serialized)) = database
+        .find_user_emby_configuration(&user.id.to_string())
+        .await
+    else {
+        return configuration;
+    };
+    let Ok(stored) = serde_json::from_str::<Value>(&serialized) else {
+        return configuration;
+    };
+    merge_emby_json_object(&mut configuration, stored);
+    configuration
+}
+
+fn merge_emby_json_object(target: &mut Value, overlay: Value) {
+    let (Some(target), Value::Object(overlay)) = (target.as_object_mut(), overlay) else {
+        return;
+    };
+    for (key, value) in overlay {
+        target.insert(key, value);
+    }
 }
 
 fn emby_user_configuration_json(ordered_views: &[String]) -> Value {
@@ -671,11 +1582,12 @@ fn emby_user_policy_json(user: &UserRecord) -> Value {
         "IsHidden": false,
         "IsHiddenRemotely": false,
         "IsDisabled": user.is_disabled,
+        "MaxParentalRating": null,
         "BlockedTags": [],
         "EnableUserPreferenceAccess": true,
         "AccessSchedules": [],
         "BlockUnratedItems": [],
-        "EnableRemoteControlOfOtherUsers": user.can_manage_server,
+        "EnableRemoteControlOfOtherUsers": false,
         "EnableSharedDeviceControl": true,
         "EnableRemoteAccess": user.can_remote_access,
         "EnableLiveTvManagement": false,
@@ -688,7 +1600,7 @@ fn emby_user_policy_json(user: &UserRecord) -> Value {
         "EnableContentDeletionFromFolders": [],
         "EnableContentDownloading": user.can_download,
         "EnableSubtitleDownloading": false,
-        "EnableSubtitleManagement": user.can_manage_server,
+        "EnableSubtitleManagement": false,
         "EnableSyncTranscoding": false,
         "EnableMediaConversion": false,
         "EnabledDevices": [],

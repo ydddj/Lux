@@ -360,6 +360,18 @@ Lux 匹配；重叠结果按 Emby 条目 ID 去重。该优化不改变 `ITEM_ST
 | 用户资料/权限 | 已实现，真实版本待验证 | 用户名、显示名、启用状态、远程访问、内容下载和按 Emby 虚拟媒体库 ID/名称/路径映射的媒体库访问权限；Emby 管理员不会自动成为 Lux 管理员 |
 | 密码迁移 | 已实现，真实版本待验证 | 不读取密码哈希；首次 Lux 登录时向 Emby 验证一次原密码 |
 
+Emby 用户管理接口已按当前官方 OpenAPI 的 `UserDto`、`UserPolicy`、`CreateUserByName`、`UpdateUserPassword`
+形态实现：`POST /Users/New` 接受 `Name` 创建无密码用户并返回 `200 UserDto`；同时兼容 NextEmby 实际发送的
+`CopyFromUserId` 和 `UserCopyOptions`，可真实复制模板的策略、用户配置、媒体库权限和媒体库顺序。`POST /Users/{Id}`
+会持久化 `Name`、`Configuration` 和支持的策略字段；`POST /Users/{Id}/Policy` 映射管理员、禁用、远程访问和内容下载权限；
+`POST /Users/{Id}/Password` 使用 `NewPw` 更新密码并使 `HasPassword`/`HasConfiguredPassword` 变为 true，成功均返回
+`200` 空响应。`DELETE /Users/{Id}` 成功返回 `200` 空响应，删除会级联撤销该用户的 Emby token 和设置；删除最后一个活动服务器管理员返回
+`409 Conflict`。用户 DTO 的 `HasPassword`、登录时间、活动时间和 `Configuration` 不再是固定假值，而是从持久化用户/令牌状态读取。
+用户头像实现 `GET/HEAD/POST/DELETE /Users/{Id}/Images/{Type}` 及带 `Index` 的路径；读取无需认证，写入/删除需要认证，上传请求体为
+`application/octet-stream` 二进制流，并只实现 `Primary` 类型。当前未以真实 Emby 客户端或受控 Emby 实例验证这些写接口。
+`GET /Sessions` 保留无参数时的 90 秒活动窗口，并兼容 NextEmby 使用的 `ActiveWithinSeconds` 扩展参数；显式值按 1 秒至 30 天校验后在数据库查询层过滤，
+非法值返回 `400 Bad Request`。官方来源：https://swagger.emby.media/openapi.json 。
+
 Emby 官方源码中的 `SqliteUserDataRepository` 只持久化 `played`、`playCount`、`isFavorite`、
 `playbackPositionTicks` 和 `lastPlayedDate` 等条目聚合状态，没有公开事件流字段；官方 Session API
 描述的是当前会话列表，不是历史播放事件。因此当前能力保持 `ITEM_STATE`，直到受控实例证明存在可用的
@@ -389,6 +401,7 @@ Lux 当前提供一个版本化的原生 Webhook 合同（`schemaVersion: 1`）�
 - 2026-08-23 AfuseKt `2.9.8.6-fix`（Android）HAR 显示其媒体库首页请求会发送空值 `IsFavorite=`；此前 `/Users/{userId}/Items` 和 `/Items/Latest` 因此返回 400，导致库条目与最新资源不显示。Emby 查询现在将空的可选布尔值按未提供处理，`tests/catalog.rs` 已加入 Items/Latest 回归；修复后的真实客户端复测待部署后进行。该客户端请求的 `/Genres` 仍属于规范明确未实现的端点。
 - 2026-08-11 服务器名称兼容修复：第三方客户端添加服务器时可从 `GET /System/Info/Public` 的 `ServerName` 读取名称；认证后的 `GET /System/Info`、`Users/Public`、`AuthenticateByName` 返回的 `User.ServerName` 也统一读取管理员设置的 `serverName`。官方 Emby 文档将 `ServerName` 定义为服务器名称字段；本次加入 `tests/emby_system.rs` 协议回归，尚未在当前环境重新进行 VidHub UI 点选复测。
 - SenPlayer 列表兼容修复：当请求的 `Fields` 未包含 `MediaSources` 或 `MediaStreams` 时，Emby 列表响应不再携带这些字段；详情和 `PlaybackInfo` 仍返回完整媒体源。自动化回归已覆盖，真实客户端需要清理缓存或重新进入库后复测。
+- 2026-09-02 SenPlayer 海报集数兼容修复：对比本机 SenPlayer 中 Emby「皮蛋粥电视机」与 Lux「Lux home」的 Reqable 脱敏抓包，确认海报右上角的未看集数读取自剧集/季度 `UserData.UnplayedItemCount`，不是 `ChildCount`。Lux 现按当前用户统计可播放且未标记已看的分集（无用户状态也算未看），并在 Emby 列表、季度列表和详情 DTO 返回该字段；`tests/series_api.rs` 已覆盖 3 集中 2 集未看的回归。Reqable 证书和抓包仅用于本机验证，不写入仓库；部署后需在 SenPlayer 清缓存或重新进入媒体库复测。
 - 2026-08-17 SenPlayer `.strm` 直放地址编码修复：HTTP(S) 目标包含 Unicode 路径或查询参数时，Emby 视频端点现在先将 URL 规范化为合法的百分号编码 `Location`，再返回原有 307 直连；数据库仍保留原始目标，不代理媒体字节。新增 API 单测和 `.strm` 集成回归，真实 SenPlayer UI 需重新部署后复测。
 - LUX-196 有序媒体库刮削器：Lux 管理 API 和 Web 管理页支持按顺序配置多个 metadata 插件；首位固定为主刮削器，后续项可设为补充、备用或两者兼具。Emby 兼容 DTO 不变。自动化测试覆盖旧单值 `scraperId` 兼容、角色排序、不可用已选插件、实际命中来源记录和补充元数据保护；真实第三方客户端尚未因该管理配置变化重新实测。
 - 2026-08-24 STRM 播放请求归属修复：HTTP(S) `.strm` 的 `DirectStreamUrl` 返回 Lux 的受保护播放入口；入口由 Lux 直连请求上游并转发 VidHub/SenPlayer 等实际播放器的 User-Agent，有限解析 302 后向播放器返回最终地址的 307。Lux 不代理媒体字节，也不经过全局出站代理。真实客户端播放需重新部署后复测。
