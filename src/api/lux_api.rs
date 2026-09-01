@@ -10,6 +10,9 @@ pub(super) fn api_routes() -> Router<AppState> {
         .route("/api/v1/favorites", get(lux_list_favorites))
         .route("/api/v1/search", get(lux_search))
         .route("/api/v1/home", get(lux_home))
+        // Lightweight first-screen payload; the Web client can load library
+        // shelves independently while legacy clients continue using /home.
+        .route("/api/v1/home/libraries", get(lux_list_libraries))
         .route(
             "/api/v1/libraries/{library_id}/items",
             get(lux_list_library_items),
