@@ -296,10 +296,9 @@ pub(super) async fn lux_home_hero(headers: HeaderMap, State(state): State<AppSta
     let Some(database) = state.database.as_ref() else { return StatusCode::SERVICE_UNAVAILABLE.into_response(); };
     let principal = AccessPrincipal::new(user.id, user.is_admin);
     let ids = match access.accessible_library_ids(principal).await { Ok(ids) => ids, Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response() };
-    let hero_library_ids = ids.into_iter().take(1).collect::<Vec<_>>();
     let page = match tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        catalog.list_recently_added_for_library_ids(&hero_library_ids, 0, 5),
+        catalog.list_recently_added_for_library_ids(&ids, 0, 5),
     ).await {
         Ok(Ok(page)) => page,
         Ok(Err(_)) | Err(_) => return Json(json!({"items": []})).into_response(),
