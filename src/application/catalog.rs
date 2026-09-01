@@ -9,6 +9,7 @@ use std::{
 };
 
 use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::time::{Duration as TokioDuration, timeout};
 
 use crate::{
     application::access::{AccessError, AccessPrincipal, MediaAccessService},
@@ -948,9 +949,19 @@ impl CatalogService {
             return Ok(items);
         }
 
-        self.database
-            .refresh_recommendation_stats_if_needed()
-            .await?;
+        // Recommendation aggregates can require a full-library pass after a
+        // restart or at the start of a new daily batch. Never let that pass
+        // block the rest of the home page indefinitely; the background warm-up
+        // will finish and the next request will populate recommendations.
+        match timeout(
+            TokioDuration::from_millis(750),
+            self.database.refresh_recommendation_stats_if_needed(),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => return Ok(Vec::new()),
+        }
 
         let rows = self
             .database
