@@ -41,7 +41,7 @@ export function HomePage({ user }: { user: LuxUser }) {
     }
   }, [home.data, queryClient, user.id]);
 
-  if (home.isPending && !home.data) return <HomeSkeleton />;
+  if (home.isPending && !home.data) return <HomeShellSkeleton />;
   if (home.error && !home.data) return <section className="lux-page-state"><h1>首页加载失败</h1><p>{home.error.message}</p></section>;
 
   const data = home.data ?? {};
@@ -195,4 +195,8 @@ function EmptyLibraries() {
 
 function HomeSkeleton() {
   return <div className="lux-home lux-skeleton-page"><div className="lux-hero lux-skeleton-block" /><div className="lux-home-content"><div className="lux-skeleton-line" /><div className="lux-skeleton-row" /><div className="lux-skeleton-row" /></div></div>;
+}
+
+function HomeShellSkeleton() {
+  return <div className="lux-home"><HeroCarousel items={[]} continueWatching={[]} /><div className="lux-home-content"><div className="lux-skeleton-line" /><div className="lux-skeleton-row" /><div className="lux-skeleton-row" /></div></div>;
 }
