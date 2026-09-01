@@ -226,9 +226,9 @@ pub(super) async fn lux_home_library_latest(
     let limit = query.page_size.unwrap_or(12).clamp(1, 50) as usize;
     let items = snapshot
         .latest_groups
-        .into_iter()
+        .iter()
         .find(|(id, _)| id == &library_id)
-        .map(|(_, items)| items.into_iter().take(limit).collect::<Vec<_>>())
+        .map(|(_, items)| items.iter().take(limit).cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     match lux_catalog_item_values_by_id(database, &user.id.to_string(), &items).await {
         Ok(values) => Json(json!({"items": lux_catalog_items_from_values(&items, &values), "total": items.len()})).into_response(),
