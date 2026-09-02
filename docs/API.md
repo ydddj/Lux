@@ -40,15 +40,15 @@ Lux 自有 API 使用 `/api/v1`，响应字段使用 camelCase。错误统一为
 以下接口要求有效 Web session；写操作还要求 `X-CSRF-Token`，并检查当前用户的 `canManageServer` 权限：
 
 - `GET /api/v1/admin/libraries`：列出媒体库及其根路径。
-- `POST /api/v1/admin/libraries`：创建媒体库。请求体为 `{ "name": "Movies", "kind": "MOVIE", "scraperId": "tmdb" }`，`kind` 支持 `MOVIE`、`SERIES`、`MIXED`；实时监听默认开启，不再提供关闭选项。历史客户端发送的 `realtimeWatchEnabled` 字段会被兼容接受但不会关闭监听。`scraperId` 可省略或为 `null`，表示不进行在线刮削，但仍读取本地 NFO 和图片。
-- `PATCH /api/v1/admin/libraries/{libraryId}`：运行时更新全量校验/元数据 cron 计划、扫描/探测并发、`scraperId` 和媒体库策略覆盖。实时增量扫描由文件系统监听触发，不接受计划配置。历史 `realtimeWatchEnabled` 字段会被兼容接受但始终按 `true` 处理；历史 `incrementalSchedule` 字段也会被兼容接受但始终为 `null`。字段均可省略；计划、`scraperId` 和 `mediaStrategy` 使用 `null` 清空，计划表达式必须是标准五段式 cron（分 时 日 月 周），最长 128 个字符；扫描并发范围为 1-1024，探测并发范围由探测器配置约束。设置 Docker 环境变量 `LUX_SCAN_CONCURRENCY` 后会全局覆盖媒体库的 `scanConcurrency`。例如 `{ "scraperId": "tmdb", "scanConcurrency": 64, "reconciliationSchedule": "0 3 * * *", "metadataSchedule": "*/5 * * * *" }`。修改无需重启，下一次调度轮询读取最新配置；刮削器必须已安装且配置完成。
+- `POST /api/v1/admin/libraries`：创建媒体库。请求体为 `{ "name": "Movies", "kind": "MOVIE", "realtimeWatchEnabled": false, "scraperId": "tmdb" }`，`kind` 支持 `MOVIE`、`SERIES`、`MIXED`；`realtimeWatchEnabled` 省略时默认开启。`scraperId` 可省略或为 `null`，表示不进行在线刮削，但仍读取本地 NFO 和图片。
+- `PATCH /api/v1/admin/libraries/{libraryId}`：运行时更新实时文件监控、全量校验/元数据 cron 计划、扫描/探测并发、`scraperId` 和媒体库策略覆盖。`realtimeWatchEnabled` 与 `realtimeMetadataAutoMatchEnabled` 相互独立；关闭前者会停止该媒体库根目录的实时文件监控，但不影响手动扫描、计划调和或外部刷新接口。历史 `incrementalSchedule` 字段仍会被兼容接受但始终为 `null`。字段均可省略；计划、`scraperId` 和 `mediaStrategy` 使用 `null` 清空，计划表达式必须是标准五段式 cron（分 时 日 月 周），最长 128 个字符；扫描并发范围为 1-1024，探测并发范围由探测器配置约束。设置 Docker 环境变量 `LUX_SCAN_CONCURRENCY` 后会全局覆盖媒体库的 `scanConcurrency`。例如 `{ "realtimeWatchEnabled": false, "scraperId": "tmdb", "scanConcurrency": 64, "reconciliationSchedule": "0 3 * * *", "metadataSchedule": "*/5 * * * *" }`。修改无需重启，下一次调度轮询读取最新配置；刮削器必须已安装且配置完成。
 - `POST /api/v1/admin/libraries/{libraryId}/roots`：添加根路径。请求体为 `{ "path": "/media/movies" }`；成功后自动创建异步扫描任务并返回 `scanJob`，扫描完成后若配置刮削器会继续自动匹配元数据。
 - `PATCH /api/v1/admin/users/{userId}/libraries/{libraryId}`：授予或撤销普通用户访问媒体库。请求体为 `{ "canView": true }`，需要管理员 Web session 和 CSRF。
 - `POST /api/v1/admin/libraries/{libraryId}/scan`：创建并异步执行分批扫描任务，返回 202 和 job 状态。
 - `POST /api/v1/admin/libraries/{libraryId}/reconcile`：按当前库配置创建并异步执行一次调和扫描；已停用或不存在的媒体库返回 404。
 - `POST /api/v1/admin/jobs/{jobId}/cancel`：请求取消扫描任务，返回 202。
 - `GET /api/v1/admin/jobs?page=1&pageSize=50&status=FAILED`：管理员分页查看扫描任务，可按 `PENDING`、`RUNNING`、`COMPLETED`、`CANCELLED` 或 `FAILED` 过滤。
-- `GET /api/v1/admin/jobs/{jobId}/events?page=1&pageSize=100&level=ERROR&eventCode=SCAN_IO`：查看单个任务的结构化生命周期日志，支持级别和稳定事件代码筛选；页大小限制为 1-100。
+- `GET /api/v1/admin/jobs/{jobId}/events?page=1&pageSize=100&level=ERROR&eventCode=SCAN_IO`：查看单个任务的结构化生命周期日志，支持级别和稳定事件代码筛选；页大小限制为 1-100。数据库只持久化 `WARN`/`ERROR` 事件，并保留最近 7 天；`INFO` 过程事件不持久化。
 - `POST /api/v1/admin/jobs/{jobId}/retry`：重试已失败或已取消的扫描任务，创建新的扫描任务并返回 202。
 - `GET /api/v1/admin/scheduled-tasks?page=1&pageSize=100`：分页查看所有已注册的任务，包含 `ownerType`、媒体库名称、`taskType`、`name`、`description`、`sourceType`、可空 `pluginId`、`schedule`、启用状态、资源限制和更新时间；结果也包含已停用或尚未配置计划的注册项。
 - `PUT /api/v1/admin/scheduled-tasks`：只修改已注册任务的 cron 计划。媒体库任务使用 `{ "ownerType": "LIBRARY", "ownerId": "...", "taskType": "RECONCILIATION_SCAN|METADATA_PARSE", "schedule": "0 3 * * *", "isEnabled": true }`；全局 STRM 任务使用 `{ "ownerType": "GLOBAL", "ownerId": "global", "taskType": "STRM_MEDIA_INFO", "schedule": "0 3 * * *" }`；全局弹幕任务使用相同的 owner 字段和 `taskType: "DANMAKU_MATCH"`，例如 `{ "schedule": "0 2 * * *" }`。媒体库任务传 `schedule: null` 或 `isEnabled: false` 会清空计划；STRM 和 DANMAKU_MATCH 任务的计划必须非空，并会同步回对应插件配置。实时增量扫描（`INCREMENTAL_SCAN`）由文件系统事件触发，不属于此接口管理范围。不存在的注册项返回 404，不会因为管理请求凭空创建任务。写操作需要管理员 Web session 和 CSRF，并与对应的媒体库或插件配置保持同一份配置。Lux 按 UTC 解释 cron 表达式。
@@ -131,6 +131,7 @@ Lux 自有 API 使用 `/api/v1`，响应字段使用 camelCase。错误统一为
 ## Emby 认证（LUX-024）
 
 - `GET /Users/Public`：返回未禁用用户的公开登录信息。
+- `GET /Users/Query`：管理员查询用户列表；支持 `StartIndex`、`Limit`、`IsDisabled`、`IsHidden`、`NameStartsWithOrGreater` 和 `SortOrder`，返回 Emby 的 `Items` 与 `TotalRecordCount`。
 - `POST /Users/AuthenticateByName`：读取 `Username`/`Pw`，解析 `Authorization`、`X-Emby-Authorization` 或 `X-Emby-Authentication` 中的 `Client`、`Device`、`DeviceId`、`Version`，返回 `AccessToken`、`ServerId`，以及包含 `ServerId`、`Configuration`、`Policy` 等兼容字段的 `User` 和 `SessionInfo`。
 - `POST /Sessions/Logout`：接受 `X-Emby-Token` 或 `api_key`，撤销对应 token，成功返回 204。
 - `System/Info`：需要有效的 `X-Emby-Token` 或 `api_key`；`System/Info/Public` 和 `System/Ping` 不要求认证。
@@ -211,11 +212,11 @@ Emby 目录查询要求有效 `X-Emby-Token` 或 `api_key`：
 - `GET|HEAD /api/v1/items/{itemId}/download`：Lux 下载端点，需要 Web session、`can_download` 和媒体库 ACL；返回所选单个媒体源，不打包 ZIP。`sourceId` 可选择源；本地源直接流式读取，`.strm` 读取首个非空远程 URL 并由 Lux 请求、流式转发该资源，不返回 `.strm` 文本。
 - `GET|POST /Items/{itemId}/PlaybackInfo`：返回可访问媒体源、媒体流、DirectPlay 能力和服务端生成的 `PlaySessionId`；支持 `MediaSourceId` 显式选择，支持 DirectPlay/DirectStream，不声明转码。每个媒体源可带 `Edition`/`Quality` 版本标签。
 - 本地媒体源的 `MediaSources.Container` 使用实际文件扩展名（例如 `mkv`、`mp4`），不暴露 ffprobe 的复合 `format_name`。`DirectStreamUrl` 通过 `MediaSourceId` 定位源；`stream.{container}` 的后缀仅作兼容性后缀，服务端仍按媒体源记录读取文件。
-- `MediaSources.Path` 对 `.strm` 源返回旁车记录中的外部媒体地址；`MediaStreams` 除基础轨道字段外，还返回旁车中的分辨率、画面比例、码率、色深、帧率、Profile、像素格式、声道布局和采样率等已验证字段。
+- `.strm` 条目的 `Path` 和 `MediaSources.Path` 均返回旁车记录中的原始媒体目标，供外部 Emby 代理执行路径映射或 302 解析；`MediaStreams` 除基础轨道字段外，还返回旁车中的分辨率、画面比例、码率、色深、帧率、Profile、像素格式、声道布局和采样率等已验证字段。
 - `MediaStreams` 不返回 Matroska/MP4 中标记为 `attached_pic` 的封面附加图轨，避免客户端将封面误认为可播放视频轨。
 - `GET /Items/{collectionId}/Children`：返回按当前用户媒体库权限过滤的合集成员。
 
-`.strm` 媒体源在 PlaybackInfo 中以 `Protocol=Http`、`IsRemote=true` 返回；`Path` 保留原始上游地址，`DirectStreamUrl` 使用 Lux 的受保护 `/Videos/{itemId}/{mediaSourceId}/stream` 入口。播放器访问该入口时，Lux 只请求上游响应头并将播放器 User-Agent 转发给 302 服务，然后返回最终地址的 307；媒体字节仍由播放器直接从最终地址读取。PlaybackInfo 本身不访问上游。具有媒体库访问权限的客户端仍可能获得包含令牌的 Path，因此 URL 中的令牌仍按产品设计明文保存和返回。
+`.strm` 媒体源在 PlaybackInfo 中以 `Protocol=File`、`IsRemote=false` 返回；条目的 `Path` 和 `MediaSources.Path` 保留原始目标，标准 `DirectStreamUrl` 使用 `/Videos/{itemId}/stream[.Container]?MediaSourceId=...` 入口，外部 Emby 代理可以据此接管映射或 302 解析。播放器直接访问 Lux 入口时，URL 型 `.strm` 由 Lux 使用播放器 User-Agent 请求上游并有限返回 307，路径型 `.strm` 按本地文件规则处理；Lux 不代理媒体字节，PlaybackInfo 本身不访问上游。具有媒体库访问权限的客户端仍可能获得包含令牌的原始目标，因此 URL 中的令牌仍按产品设计明文保存和返回。
 
 - `GET /Sessions`：返回当前用户的活动播放会话；管理员可查看全部活动会话。每个会话按 Emby 兼容字段返回 `Client`、`DeviceName`、`DeviceId`、`DeviceType`、`ApplicationVersion` 和 `RemoteEndPoint`；无法获得的值为 `null`。
 - `POST /Sessions/Playing`、`/Sessions/Playing/Progress`、`/Sessions/Playing/Stopped`：幂等记录播放事件，并将位置单调写入用户状态；事件体中的设备/客户端字段优先，缺失时从上述认证头回填。

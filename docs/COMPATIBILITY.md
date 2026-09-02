@@ -367,8 +367,12 @@ Emby 用户管理接口已按当前官方 OpenAPI 的 `UserDto`、`UserPolicy`�
 `POST /Users/{Id}/Password` 使用 `NewPw` 更新密码并使 `HasPassword`/`HasConfiguredPassword` 变为 true，成功均返回
 `200` 空响应。`DELETE /Users/{Id}` 成功返回 `200` 空响应，删除会级联撤销该用户的 Emby token 和设置；删除最后一个活动服务器管理员返回
 `409 Conflict`。用户 DTO 的 `HasPassword`、登录时间、活动时间和 `Configuration` 不再是固定假值，而是从持久化用户/令牌状态读取。
-用户头像实现 `GET/HEAD/POST/DELETE /Users/{Id}/Images/{Type}` 及带 `Index` 的路径；读取无需认证，写入/删除需要认证，上传请求体为
-`application/octet-stream` 二进制流，并只实现 `Primary` 类型。当前未以真实 Emby 客户端或受控 Emby 实例验证这些写接口。
+`GET /Users/Query` 现已按 Emby 的 `QueryResult<UserDto>` 形状返回分页用户列表，支持管理员 API Key/Emby token、`IsDisabled`、`IsHidden`、`NameStartsWithOrGreater` 和 `SortOrder`；根路径及 `/emby` 前缀均可用。
+用户头像实现 `GET/HEAD/POST/DELETE /Users/{Id}/Images/{Type}` 及带 `Index` 的路径；读取无需认证，写入/删除需要认证，且只实现
+`Primary` 类型。官方 Emby 的 `application/octet-stream` 二进制上传保持支持；实测 NextEmby v4.6.3 会发送
+`Content-Type: image/png`，但请求体是未带 Data URL 前缀的标准 Base64 PNG 文本。Lux 仅对声明为 JPEG、PNG 或 WebP
+的请求尝试解码该兼容形态，随后仍按解码后的实际图片签名和 5 MiB 上限校验，并保存为图片二进制。Policy、Password、用户删除和头像写入成功均返回
+`200` 空响应；其中 NextEmby v4.6.3 会把 Policy 的合法 `200` 空响应记录成客户端侧警告，但不影响策略写入。
 `GET /Sessions` 保留无参数时的 90 秒活动窗口，并兼容 NextEmby 使用的 `ActiveWithinSeconds` 扩展参数；显式值按 1 秒至 30 天校验后在数据库查询层过滤，
 非法值返回 `400 Bad Request`。官方来源：https://swagger.emby.media/openapi.json 。
 
@@ -391,7 +395,7 @@ Lux 当前提供一个版本化的原生 Webhook 合同（`schemaVersion: 1`）�
 
 当前只提供 Webhook 渠道；Telegram、企业微信和 Email 尚未实现。
 
-- 媒体库实时监听默认开启。复制到已配置根路径中的新视频会进入局部 `INCREMENTAL_SCAN`，只处理该事件路径，通常在几秒内进入索引；全量调和遇到待处理的局部任务会在当前批次提交后让出唯一扫描锁，优先完成局部索引；旧版 `realtimeWatchEnabled` 请求字段不会关闭监听。
+- 媒体库实时监听默认开启，也可通过 `realtimeWatchEnabled` 关闭。关闭后不会为该库根路径创建实时 watcher，但手动扫描、调和和外部刷新仍可用；开启时复制到已配置根路径中的新视频会进入局部 `INCREMENTAL_SCAN`，只处理该事件路径，通常在几秒内进入索引。
 - LUX-000 至 LUX-003：仅完成仓库工程检查，尚未连接任何真实客户端。
 - LUX-023：已完成根路径/`/emby` 前缀的 System/Ping 本地协议 shape 测试；`GET/POST /System/Ping` 按 Emby OpenAPI 兼容为无需认证的空 200，并完成 VidHub/SenPlayer 真实登录前置探针。
 - 2026-08-23 Infuse 8.5.5726（macOS arm64）连接探针发现：登录成功后请求 `/DisplayPreferences/usersettings?userId=:userId&client=:client`，此前因路由缺失落入 Web 首页 HTML，导致 JSON 解码失败；现已补齐带认证的 `GET /DisplayPreferences/{displayPreferencesId}`，根路径和 `/emby` 前缀均有自动协议回归。完整 Infuse 媒体库、播放和状态流程仍待部署后复测。
@@ -413,6 +417,7 @@ Lux 当前提供一个版本化的原生 Webhook 合同（`schemaVersion: 1`）�
 - 2026-08-26 LUX-199 Redia 兼容：`MediaSource.DirectStreamUrl` 现在使用标准 Emby 的 `/Videos/{ItemId}/stream[.Container]?MediaSourceId={MediaSourceId}`，旧的媒体源路径入口继续保留；`GET /Items/{MediaSourceId}` 及 `/emby` 前缀可返回所属可见条目的 `MediaSources[].Path`。路径型 `.strm` 仍保持 `Protocol=File`、`IsRemote=false`，Lux 不访问或代理云盘媒体。自动化测试已覆盖标准查询播放、历史 URL、编码查询参数和媒体源 ID 详情；真实 Redia 联调需远端重新部署后复测。
 - 2026-08-26 Redia 起播性能定位与优化：发现 Redia 在标准视频入口前会发起单个 `GET /Items?Ids=...` 查询，远端冷请求约 9–12 秒，而直接 `GET /Items/{id}` 约 0.3–0.4 秒。Lux 现对无冲突过滤条件的单个 `Ids` 查询直接按条目或媒体源 ID 查找，保留多 ID、筛选和分页请求的原有分页语义；之前的本机 VidHub 日志显示已预热源可在约 4 秒内开始回报进度，未预热源的等待仍属于 Redia/115 直链生成。补充实测：本机 VidHub 当前连接的远程 Luxx/Redia 实例，冷起播两次从 `MPVPlayerManager init` 到首帧相关的 `Has end credit time` 事件分别约 23.1 秒和 22.0 秒；工作树尚未部署到该远程实例，因此这不是本次代码优化后的结果。
 - 2026-08-26 LUX-199 Web/Redia 补充：`/api/v1/playback/sessions` 对路径型 `.strm` 的 Direct Play 计划额外返回标准 `/Videos/{ItemId}/stream?MediaSourceId={MediaSourceId}` `proxyUrl`，Web 播放器优先使用该地址，因此 Redia 代理 Lux Web 页面时也能接管并映射到云盘直链；代理请求失败时回退到原有 Lux 短期签名 `url`，普通本地源和 URL 型 `.strm` 继续只使用签名地址。媒体源 ID 详情查询改为轻量路径，避免为 Redia 读取演员、NFO 和图片比例。自动化回归已覆盖，真实 Redia/Web 联调需部署后复测。
+- 2026-09-02 LUX-234 通用 `.strm` 外部代理交接：URL 型和路径型 `.strm` 的 Emby 条目 `Path`、`MediaSources[].Path` 均保留原始目标，代理兼容字段统一为 `Protocol=File`、`IsRemote=false`，Lux Web Direct Play 均提供标准 `proxyUrl`；外部代理可据此自行执行映射或 302 解析。Lux 直接收到播放请求时仍保留 URL 型 307 和路径型本地 Range 回退。`tests/strm.rs`、`tests/web_playback.rs` 和 `tests/strm_resolver_playback.rs` 已通过；真实外部代理部署联调尚未完成。
 - `cargo` 验证是在本机 `arm64` 上完成，不代表目标 x86_64 飞牛 NAS 性能或客户端兼容性。
 - Web 的“已实现”仅表示代码路径和服务端静态集成已完成；当前 Chrome smoke 覆盖登录、筛选、播放、收藏、账户会话和管理流程，不等同于所有浏览器/编码格式兼容。
 - LUX-193 的演员收藏属于 Lux Web 自有 API 和人物详情能力，不扩展 Emby `Persons` DTO 或 Emby `FavoriteItems` 语义；演员收藏的目标客户端兼容性尚未单独实测。

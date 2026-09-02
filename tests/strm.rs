@@ -200,6 +200,18 @@ async fn strm_sources_store_first_non_empty_line_and_returns_url_to_the_client()
         popcorn_detail_body["MediaSources"][0]["Id"],
         remote_source_id
     );
+    assert_eq!(popcorn_detail_body["Path"], remote_target);
+
+    let path_detail = client
+        .get(format!(
+            "http://{address}/Items/{path_item_id}?Fields=Path,MediaSources"
+        ))
+        .header("X-Emby-Token", &token)
+        .send()
+        .await?;
+    assert_eq!(path_detail.status(), reqwest::StatusCode::OK);
+    let path_detail_body = path_detail.json::<Value>().await?;
+    assert_eq!(path_detail_body["Path"], "targets/movie (4K).target");
 
     let popcorn_playback = client
         .post(format!(
@@ -244,8 +256,9 @@ async fn strm_sources_store_first_non_empty_line_and_returns_url_to_the_client()
         .await?;
     assert_eq!(playback.status(), reqwest::StatusCode::OK);
     let body = playback.json::<Value>().await?;
-    assert_eq!(body["MediaSources"][0]["Protocol"], "Http");
-    assert_eq!(body["MediaSources"][0]["IsRemote"], true);
+    assert_eq!(body["MediaSources"][0]["Protocol"], "File");
+    assert_eq!(body["MediaSources"][0]["IsRemote"], false);
+    assert_eq!(body["MediaSources"][0]["Path"], remote_target);
     assert_eq!(body["MediaSources"][0]["SupportsDirectPlay"], true);
     assert_eq!(body["MediaSources"][0]["SupportsDirectStream"], true);
     let remote_direct_url = body["MediaSources"][0]["DirectStreamUrl"]

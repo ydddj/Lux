@@ -3447,10 +3447,19 @@ pub(super) fn emby_file_name(
     Some(format!("{}.{}", item.title, container))
 }
 
-/// Emby always exposes a filesystem path on item DTOs. Lux never reveals real
-/// local paths, so synthesize a stable, harmless path from the library id and
-/// title; clients only display this value.
+/// Emby always exposes a filesystem path on item DTOs. External proxies need
+/// the original STRM target here to map playback, while ordinary local media
+/// continues to use a stable, harmless path instead of revealing the real
+/// filesystem location.
 pub(super) fn emby_safe_path(item: &CatalogItem, default_source: Option<&CatalogSource>) -> String {
+    if let Some(target) = default_source
+        .filter(|source| source.source_kind == "STRM_URL")
+        .and_then(|source| source.external_url.as_deref())
+        .filter(|target| !target.is_empty())
+    {
+        return target.to_owned();
+    }
+
     let title = &item.title;
     if matches!(
         item.item_type.as_str(),
@@ -3595,25 +3604,29 @@ pub(super) fn emby_media_source_json_with_resolver_and_chapters(
             .map(classify_strm_target)
             .map_or(StrmTargetKind::Empty, |target| target.kind)
     });
-    let is_remote = matches!(strm_target_kind, Some(StrmTargetKind::Url));
-    let is_local_strm_target = matches!(strm_target_kind, Some(StrmTargetKind::Path));
+    // External Emby proxies consume the raw Path for both URL and path STRM
+    // targets. Keep their wire representation identical while preserving the
+    // URL resolver as Lux's direct-play fallback when no proxy takes over.
+    let is_proxy_compatible_strm_target = matches!(
+        strm_target_kind,
+        Some(StrmTargetKind::Url | StrmTargetKind::Path)
+    );
     let is_resolver_target = strm_resolver_available
         && matches!(
             strm_target_kind,
             Some(StrmTargetKind::Smb | StrmTargetKind::Ftp)
         );
     let direct_stream_url = if source.source_kind == "LOCAL_FILE"
-        || is_local_strm_target
-        || is_remote
+        || is_proxy_compatible_strm_target
         || is_resolver_target
     {
         Some(emby_media_source_stream_url(item_id, source))
     } else {
         None
     };
-    let is_remote_playback = is_remote || is_resolver_target;
+    let is_remote_playback = is_resolver_target;
     let is_playable =
-        source.source_kind == "LOCAL_FILE" || is_local_strm_target || is_remote_playback;
+        source.source_kind == "LOCAL_FILE" || is_proxy_compatible_strm_target || is_remote_playback;
     let default_audio_stream_index = source
         .streams
         .iter()
