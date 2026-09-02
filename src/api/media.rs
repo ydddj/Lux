@@ -226,7 +226,14 @@ pub(super) async fn lux_home_library_latest(
     if !ids.iter().any(|id| id == &library_id) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let items = home.cached_latest_for_library(&library_id, query.page_size.unwrap_or(12).clamp(1, 50) as usize).await;
+    let snapshot = match home.snapshot(principal, ids).await {
+        Ok(value) => value,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let limit = query.page_size.unwrap_or(12).clamp(1, 50) as usize;
+    let items = snapshot.latest_groups.iter().find(|(id, _)| id == &library_id)
+        .map(|(_, items)| items.iter().take(limit).cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
     match lux_catalog_item_values_by_id(database, &user.id.to_string(), &items).await {
         Ok(values) => Json(json!({"items": lux_catalog_items_from_values(&items, &values), "total": items.len()})).into_response(),
         Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),

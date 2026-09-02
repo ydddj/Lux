@@ -83,13 +83,11 @@ struct CachedSnapshot {
     snapshot: Arc<HomeSnapshot>,
 }
 
-#[derive(Clone)]
 struct HomeSharedSnapshot {
     latest_groups: Vec<(String, Vec<CatalogItem>)>,
     views: Vec<LibraryView>,
 }
 
-#[derive(Clone)]
 struct CachedSharedSnapshot {
     generation: u64,
     refreshed_at: Instant,
@@ -196,14 +194,6 @@ impl HomeService {
             snapshot: snapshot.clone(),
         });
         Ok(snapshot)
-    }
-
-    /// Returns the already-built shared shelf without triggering a cold refresh.
-    /// A background refresh will populate it for the next poll.
-    pub(crate) async fn cached_latest_for_library(&self, library_id: &str, limit: usize) -> Vec<CatalogItem> {
-        let cached = self.inner.shared.try_lock().ok().and_then(|value| value.clone());
-        cached.and_then(|entry| entry.snapshot.latest_groups.iter().find(|(id, _)| id == library_id)
-            .map(|(_, items)| items.iter().take(limit).cloned().collect())).unwrap_or_default()
     }
 
     pub(crate) fn invalidate(&self) {
