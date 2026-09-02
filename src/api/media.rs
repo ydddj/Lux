@@ -226,14 +226,7 @@ pub(super) async fn lux_home_library_latest(
     if !ids.iter().any(|id| id == &library_id) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let items = match tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        home.latest_for_library(&library_id, query.page_size.unwrap_or(12).clamp(1, 50) as usize),
-    ).await {
-        Ok(value) => value,
-        Err(_) => Ok(Vec::new()),
-    };
-    let items = match items { Ok(items) => items, Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response() };
+    let items = home.cached_latest_for_library(&library_id, query.page_size.unwrap_or(12).clamp(1, 50) as usize).await;
     match lux_catalog_item_values_by_id(database, &user.id.to_string(), &items).await {
         Ok(values) => Json(json!({"items": lux_catalog_items_from_values(&items, &values), "total": items.len()})).into_response(),
         Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
