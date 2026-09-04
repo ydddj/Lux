@@ -15,12 +15,26 @@ type ChangelogRelease = {
 
 export const changelogReleases: ChangelogRelease[] = [
   {
+    version: "0.3.8",
+    date: "2026-09-04",
+    sections: [
+      { kind: "added", items: [
+        "新增 Emby 兼容媒体删除能力：服务器管理权限用户可通过 DELETE /Items/{itemId} 删除媒体源，并按权限返回详情 DTO 的 CanDelete。",
+      ] },
+      { kind: "fixed", items: [
+        "修复平铺电影目录中多个 NFO 变体及不可用媒体记录参与身份冲突判断不正确的问题；现在可以识别真实的同目录 NFO 冲突，并忽略已不可用记录。",
+        "修复本地 NFO 首映/发行日期未同步到媒体条目索引的问题；日期现在会在索引缺失时写入，并用于后续详情和查询响应。",
+      ] },
+    ],
+  },
+  {
     version: "0.3.7",
     date: "2026-09-02",
     sections: [
       { kind: "added", items: [
         "Emby 兼容接口新增 GET /Users/Query，支持管理员分页查询用户，并按禁用、隐藏、名称起点和排序条件过滤。",
         "管理台支持按媒体库启用或停用实时文件监听，首次创建媒体库时默认启用。",
+        "Emby 兼容层对外使用由内部 UUID 无状态编码得到的稳定纯数字媒体条目 ID，同时兼容数字 ID 和历史 UUID 请求，覆盖详情、目录、播放、字幕、图片、下载、进度及收藏/已看接口。",
       ] },
       { kind: "fixed", items: [
         "修复服务升级和启动后扫描生命周期数据持续累积的问题；自动清理已完成或取消任务的路径与调和记录、已无需恢复的目标和过期事件，同时保留运行中及可恢复的失败任务。",
@@ -28,14 +42,14 @@ export const changelogReleases: ChangelogRelease[] = [
         "修复增量扫描在自动触发 STRM 探测时过早清理扫描路径、导致探测任务无法读取变更范围的问题；现在会在探测完成后再清理路径记录。",
         "修复 PostgreSQL 中本地 NFO 评分无法持久化的问题；媒体元数据更新现在正确保留评分值。",
         "修复 URL 型 .strm 交给外部媒体代理时的媒体源兼容性问题，避免代理因协议和远程标记不一致而无法接管播放。",
-        "修复 URL/路径型 .strm 在 Emby PlaybackInfo 中被 Lux 签名直连地址替换、导致外部媒体代理无法接管的问题；现在保留标准媒体流入口，由入口继续处理原始播放目标。",
+        "修复 URL/路径型 .strm 在公网代理场景中将 DirectStreamUrl 暴露为内网 302 地址、导致播放器绕过代理而无法播放的问题；现在 Path 保留原始映射信息，DirectStreamUrl 使用带短期票据的标准 Emby 视频入口，并关闭 AddApiKeyToDirectStreamUrl。",
         "修复 SMB/FTP .strm 被错误暴露为原始 URL 的问题；这类目标继续使用 Lux 协议解析器和签名播放入口。",
       ] },
       { kind: "changed", items: [
         "收紧人物关系快照的恢复边界；服务启动和后台索引重建不再从配置卷快照自动恢复关系，数据库清空后需重新扫描媒体库重建关系。",
         "后台任务在服务启动和正常关闭时统一取消未完成任务，并停止重启后的自动恢复；任务会保留为可诊断、可手动重试的状态，避免重复执行或与新任务并发。",
         "URL 型和路径型 .strm 的 Emby 媒体源统一保留原始目标并提供标准代理入口；Lux 仍保留 URL 型 .strm 直接访问时的受保护入口和 307 重定向回退。",
-        "调整 .strm 的 Emby PlaybackInfo 兼容策略：URL/路径型目标为外部代理保留标准 /Videos/.../stream 入口，协议解析器目标继续使用 Lux 受保护入口。",
+        "调整 .strm 的 Emby PlaybackInfo 兼容策略：URL/路径型目标从 Path 提供原始映射信息，DirectStreamUrl 使用标准带短期票据的 Emby 视频入口；协议解析器目标继续使用 Lux 受保护入口，Web 播放计划不变。",
       ] },
     ],
   },

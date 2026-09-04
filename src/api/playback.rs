@@ -17,7 +17,8 @@ pub(super) async fn emby_playback_info(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let principal = AccessPrincipal::new(user.id, user.is_admin);
-    let item = match catalog.find_item(principal, &item_id).await {
+    let internal_item_id = emby_internal_id(&item_id);
+    let item = match catalog.find_item(principal, &internal_item_id).await {
         Ok(Some(item)) => item,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(CatalogError::Storage(_)) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -67,27 +68,7 @@ pub(super) async fn emby_playback_info(
                 let has_direct_stream_url = value
                     .get("DirectStreamUrl")
                     .is_some_and(Value::is_string);
-                let uses_external_proxy_handoff = has_direct_stream_url
-                    && source.source_kind == "STRM_URL"
-                    && source.external_url.as_deref().is_some_and(|target| {
-                        matches!(
-                            classify_strm_target(target).kind,
-                            StrmTargetKind::Url | StrmTargetKind::Path
-                        )
-                    });
-                if uses_external_proxy_handoff {
-                    // Preserve the original URL or local path so a downstream
-                    // Emby proxy can extract its own mapping identifiers from
-                    // the STRM target. SMB and FTP targets intentionally stay
-                    // on Lux's signed resolver entrypoint below.
-                    if let Value::Object(object) = &mut value {
-                        object.insert(
-                            "DirectStreamUrl".to_owned(),
-                            json!(source.external_url),
-                        );
-                        object.insert("AddApiKeyToDirectStreamUrl".to_owned(), json!(false));
-                    }
-                } else if has_direct_stream_url
+                if has_direct_stream_url
                     && let Some(service) = state.web_playback.as_ref()
                     && let Some(url) = emby_signed_direct_stream_url(service, &item.id, source, &user)
                     && let Value::Object(object) = &mut value
@@ -219,6 +200,7 @@ pub(super) async fn handle_emby_playback_event(
         return StatusCode::BAD_REQUEST.into_response();
     }
     let item_id_prefix = playback_identifier_prefix(&request.item_id);
+    let internal_item_id = emby_internal_id(&request.item_id);
     let Some(access) = state.access.as_ref() else {
         tracing::error!(
             event = "emby_playback_callback_rejected",
@@ -233,7 +215,7 @@ pub(super) async fn handle_emby_playback_event(
     match access
         .can_view_item(
             AccessPrincipal::new(user.id, user.is_admin),
-            &request.item_id,
+            &internal_item_id,
         )
         .await
     {
@@ -279,7 +261,7 @@ pub(super) async fn handle_emby_playback_event(
         .filter(|value| !value.is_empty());
     if let Some(media_source_id) = media_source_id {
         match database
-            .media_source_belongs_to_item(media_source_id, &request.item_id)
+            .media_source_belongs_to_item(media_source_id, &internal_item_id)
             .await
         {
             Ok(true) => {}
@@ -347,7 +329,7 @@ pub(super) async fn handle_emby_playback_event(
     let play_session_id = request
         .play_session_id
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| format!("{}:{device_id}", request.item_id));
+        .unwrap_or_else(|| format!("{}:{device_id}", internal_item_id));
     let user_id = user.id.to_string();
     let played_percent = match database.user_played_percent(&user_id).await {
         Ok(value) => value,
@@ -380,7 +362,7 @@ pub(super) async fn handle_emby_playback_event(
     match database
         .record_playback_event(NewPlaybackEvent {
             user_id: &user_id,
-            item_id: &request.item_id,
+            item_id: &internal_item_id,
             media_source_id,
             play_session_id: &play_session_id,
             device_id: &device_id,
@@ -399,7 +381,7 @@ pub(super) async fn handle_emby_playback_event(
     {
         Ok(()) => {
             if database
-                .sync_played_container_states(&user_id, &request.item_id)
+                .sync_played_container_states(&user_id, &internal_item_id)
                 .await
                 .is_err()
             {
@@ -411,7 +393,7 @@ pub(super) async fn handle_emby_playback_event(
                     &state.admin_events,
                     &user_id,
                     event_type,
-                    Some(&request.item_id),
+                    Some(&internal_item_id),
                     json!({
                         "client": client,
                         "clientVersion": client_version,
@@ -428,7 +410,7 @@ pub(super) async fn handle_emby_playback_event(
                     &state,
                     event_type,
                     occurred_at,
-                    &request.item_id,
+                    &internal_item_id,
                     media_source_id,
                     &play_session_id,
                     state_name,
@@ -545,7 +527,7 @@ pub(super) async fn publish_playback_webhook(
         event_type.as_str()
     );
     let data = json!({
-        "itemId": item_id,
+        "itemId": emby_public_id(item_id),
         "mediaSourceId": media_source_id,
         "playSessionId": play_session_id,
         "state": state_name,
@@ -647,7 +629,7 @@ pub(super) fn emby_session_json(
 ) -> Value {
     let runtime_ticks = session_runtime_ticks(session, catalog_item);
     let mut now_playing_item = json!({
-        "Id": session.item_id,
+        "Id": emby_public_id(&session.item_id),
         "RunTimeTicks": runtime_ticks,
     });
     if let Some(item) = catalog_item
@@ -674,7 +656,7 @@ pub(super) fn emby_session_json(
     json!({
         "Id": session.id,
         "UserId": session.user_id,
-        "ItemId": session.item_id,
+        "ItemId": emby_public_id(&session.item_id),
         "MediaSourceId": session.media_source_id.as_deref().unwrap_or(""),
         "PlaySessionId": session.play_session_id,
         "Client": session.client.as_deref().unwrap_or("Unknown"),
@@ -1648,6 +1630,7 @@ pub(super) async fn handle_emby_user_flag(
     let Some(access) = state.access.as_ref() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    let item_id = emby_internal_id(&item_id);
     match access
         .can_view_item(AccessPrincipal::new(user.id, user.is_admin), &item_id)
         .await
