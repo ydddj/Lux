@@ -141,8 +141,9 @@ async fn local_file_stream_supports_full_head_range_acl_and_path_safety()
         .as_str()
         .ok_or("missing generic direct stream URL")?;
     assert!(generic_direct_url.starts_with(&format!(
-        "/Videos/{emby_item_id}/stream.mkv?MediaSourceId={source_id}&luxPlayback"
+        "/Videos/{emby_item_id}/stream.mkv?MediaSourceId={source_id}&UserId="
     )));
+    assert!(generic_direct_url.contains("&luxPlayback"));
     assert!(!generic_direct_url.contains(&token));
     assert_eq!(
         playback_body["MediaSources"][0]["AddApiKeyToDirectStreamUrl"],
@@ -539,6 +540,26 @@ async fn emby_playback_events_accept_vidhub_field_names_and_persist_progress()
     .fetch_one(database.pool())
     .await?;
     assert_eq!(completed_state, (800, 1));
+
+    let hills_completed = client
+        .post(format!("{playback_base}/Stopped"))
+        .header("X-Emby-Token", &token)
+        .json(&json!({
+            "ItemId": emby_item_id,
+            "MediaSourceId": source_id,
+            "PlaySessionId": "hills-completed-session",
+            "PositionTicks": 950,
+        }))
+        .send()
+        .await?;
+    assert_eq!(hills_completed.status(), reqwest::StatusCode::NO_CONTENT);
+    let hills_completed_state = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT position_ticks, is_played FROM user_item_state WHERE item_id = ?",
+    )
+    .bind(&item_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(hills_completed_state, (950, 1));
 
     server.abort();
     assert!(!admin.id.to_string().is_empty());

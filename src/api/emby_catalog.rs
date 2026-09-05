@@ -3711,10 +3711,7 @@ pub(super) fn emby_media_source_json_with_resolver_and_chapters(
     // External Emby proxies consume the raw Path for both URL and path STRM
     // targets. Keep their wire representation identical while preserving the
     // URL resolver as Lux's direct-play fallback when no proxy takes over.
-    let is_proxy_compatible_strm_target = matches!(
-        strm_target_kind,
-        Some(StrmTargetKind::Url | StrmTargetKind::Path)
-    );
+    let is_proxy_compatible_strm_target = emby_source_needs_proxy_identity(source);
     let is_resolver_target = strm_resolver_available
         && matches!(
             strm_target_kind,
@@ -3831,6 +3828,9 @@ pub(super) fn emby_media_source_stream_url_parts(
     let item_id = emby_public_id(item_id);
     let stream_suffix = container
         .filter(|container| !(source_kind == "STRM_URL" && container.eq_ignore_ascii_case("strm")))
+        .filter(|container| {
+            !container.is_empty() && container.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
         .map(|container| format!(".{container}"))
         .unwrap_or_default();
     format!("/Videos/{item_id}/stream{stream_suffix}?MediaSourceId={source_id}")
@@ -3841,6 +3841,7 @@ pub(super) fn emby_signed_direct_stream_url(
     item_id: &str,
     source: &crate::application::catalog::CatalogSource,
     user: &UserRecord,
+    api_key: Option<&str>,
 ) -> Option<String> {
     let expires_at = current_unix_timestamp().saturating_add(EMBY_DIRECT_STREAM_TTL_SECONDS);
     let user_id = user.id.to_string();
@@ -3852,6 +3853,20 @@ pub(super) fn emby_signed_direct_stream_url(
         expires_at,
     )?;
     let mut url = emby_media_source_stream_url(item_id, source);
+    if let Some(api_key) = api_key.filter(|api_key| !api_key.is_empty()) {
+        // Some clients advertise AddApiKeyToDirectStreamUrl but drop the
+        // token on their independent media request. External proxies need
+        // the token to map the request back to the proxy user before
+        // resolving a STRM.
+        url.push_str("&api_key=");
+        url.push_str(&percent_encode_filename(api_key));
+    }
+    // Some external Emby proxies use the standard UserId query parameter as
+    // their local username/identity lookup key. Lux's UUID is intentionally
+    // kept in the signed ticket; the login name is only an untrusted proxy
+    // hint and never authorizes the Lux request.
+    url.push_str("&UserId=");
+    url.push_str(&percent_encode_filename(&user.username_normalized));
     url.push_str("&luxPlaybackUserId=");
     url.push_str(&percent_encode_filename(&user_id));
     url.push_str("&luxPlaybackAdmin=");
@@ -4049,6 +4064,18 @@ pub(super) fn emby_library_view_json(
             "Played": false,
         },
     })
+}
+
+pub(super) fn emby_source_needs_proxy_identity(
+    source: &crate::application::catalog::CatalogSource,
+) -> bool {
+    source.source_kind == "STRM_URL"
+        && source.external_url.as_deref().is_some_and(|target| {
+            matches!(
+                classify_strm_target(target).kind,
+                StrmTargetKind::Url | StrmTargetKind::Path
+            )
+        })
 }
 
 pub(super) fn emby_virtual_folder_json(

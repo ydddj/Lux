@@ -9,6 +9,8 @@ pub(super) async fn emby_playback_info(
     State(state): State<AppState>,
 ) -> Response {
     let query = emby_stream_query_from_raw(raw_query);
+    let standard_api_key =
+        standard_emby_playback_api_key(&headers, query.api_key.as_deref(), &state).await;
     let user = match require_emby_user(&headers, &state, query.api_key.as_deref()).await {
         Ok(user) => user,
         Err(status) => return status.into_response(),
@@ -70,19 +72,65 @@ pub(super) async fn emby_playback_info(
                     .is_some_and(Value::is_string);
                 if has_direct_stream_url
                     && let Some(service) = state.web_playback.as_ref()
-                    && let Some(url) = emby_signed_direct_stream_url(service, &item.id, source, &user)
+                    && let Some(url) = emby_signed_direct_stream_url(
+                        service,
+                        &item.id,
+                        source,
+                        &user,
+                        if emby_source_needs_proxy_identity(source) {
+                            standard_api_key.as_deref()
+                        } else {
+                            None
+                        },
+                    )
                     && let Value::Object(object) = &mut value
                 {
                     object.insert("DirectStreamUrl".to_owned(), json!(url));
-                    // The signed URL is already authorized. Do not ask clients
-                    // to append a long-lived Emby token to it as well.
-                    object.insert("AddApiKeyToDirectStreamUrl".to_owned(), json!(false));
+                    // Third-party clients may send the media request through
+                    // an independent stack. External proxies use the
+                    // standard Emby token to identify the proxy user, while
+                    // Lux still requires the signed ticket. For URL/path STRM
+                    // sources the token is already embedded for clients that
+                    // ignore AddApiKeyToDirectStreamUrl.
+                    object.insert(
+                        "AddApiKeyToDirectStreamUrl".to_owned(),
+                        json!(emby_source_needs_proxy_identity(source)),
+                    );
                 }
                 value
             })
             .collect::<Vec<_>>(),
     }))
     .into_response()
+}
+
+async fn standard_emby_playback_api_key(
+    headers: &HeaderMap,
+    query_api_key: Option<&str>,
+    state: &AppState,
+) -> Option<String> {
+    // X-Lux-Api-Key is the shared Lux management credential, not a user
+    // identity that an external Emby proxy can safely receive.
+    let token = if headers.contains_key("X-Lux-Api-Key") {
+        None
+    } else {
+        emby_token_from_headers(headers).or_else(|| {
+            query_api_key
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+    }?;
+
+    // The shared management key is also accepted on Emby-compatible routes
+    // for administration. Never copy it into a playback URL, even when it
+    // was supplied as the query api_key.
+    if let Some(service) = state.admin_api_key.as_ref() {
+        match service.resolve(&token).await {
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) => {}
+        }
+    }
+    Some(token)
 }
 
 #[derive(Deserialize, Default)]
@@ -131,12 +179,20 @@ pub(super) struct PlaybackEventRequest {
     device_type: Option<String>,
 }
 
+fn parse_emby_playback_event(body: &Bytes) -> Result<PlaybackEventRequest, StatusCode> {
+    serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST)
+}
+
 pub(super) async fn emby_playing(
     headers: HeaderMap,
     Query(query): Query<EmbyTokenQuery>,
     State(state): State<AppState>,
-    Json(request): Json<PlaybackEventRequest>,
+    body: Bytes,
 ) -> Response {
+    let request = match parse_emby_playback_event(&body) {
+        Ok(request) => request,
+        Err(status) => return status.into_response(),
+    };
     handle_emby_playback_event(headers, query, state, request, "PLAYING").await
 }
 
@@ -144,8 +200,12 @@ pub(super) async fn emby_playing_progress(
     headers: HeaderMap,
     Query(query): Query<EmbyTokenQuery>,
     State(state): State<AppState>,
-    Json(request): Json<PlaybackEventRequest>,
+    body: Bytes,
 ) -> Response {
+    let request = match parse_emby_playback_event(&body) {
+        Ok(request) => request,
+        Err(status) => return status.into_response(),
+    };
     let state_name = if request.is_paused {
         "PAUSED"
     } else {
@@ -158,8 +218,12 @@ pub(super) async fn emby_playing_stopped(
     headers: HeaderMap,
     Query(query): Query<EmbyTokenQuery>,
     State(state): State<AppState>,
-    Json(request): Json<PlaybackEventRequest>,
+    body: Bytes,
 ) -> Response {
+    let request = match parse_emby_playback_event(&body) {
+        Ok(request) => request,
+        Err(status) => return status.into_response(),
+    };
     handle_emby_playback_event(headers, query, state, request, "STOPPED").await
 }
 
@@ -342,6 +406,22 @@ pub(super) async fn handle_emby_playback_event(
         Ok(session) => session,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
+    let duration_ticks = if let Some(duration_ticks) = request.duration_ticks {
+        Some(duration_ticks)
+    } else if let Some(duration_ticks) = previous_session
+        .as_ref()
+        .and_then(|session| session.duration_ticks)
+    {
+        Some(duration_ticks)
+    } else {
+        emby_playback_event_duration_ticks(
+            &state,
+            AccessPrincipal::new(user.id, user.is_admin),
+            &internal_item_id,
+            media_source_id,
+        )
+        .await
+    };
     let activity_event = playback_activity_event_type(previous_session.as_ref(), state_name);
     let occurred_at = current_unix_timestamp();
     let webhook_event = webhook_event_type_for_playback(
@@ -373,7 +453,7 @@ pub(super) async fn handle_emby_playback_event(
             remote_ip: remote_ip.as_deref(),
             state: state_name,
             position_ticks: request.position_ticks,
-            duration_ticks: request.duration_ticks,
+            duration_ticks,
             played_percent,
             is_paused: request.is_paused || state_name == "PAUSED",
         })
@@ -415,7 +495,7 @@ pub(super) async fn handle_emby_playback_event(
                     &play_session_id,
                     state_name,
                     request.position_ticks,
-                    request.duration_ticks,
+                    duration_ticks,
                     request.is_paused || state_name == "PAUSED",
                     client,
                     device_name,
@@ -429,7 +509,7 @@ pub(super) async fn handle_emby_playback_event(
                 playback_state = state_name,
                 item_id_prefix = %item_id_prefix,
                 position_ticks = request.position_ticks,
-                duration_ticks_present = request.duration_ticks.is_some(),
+                duration_ticks_present = duration_ticks.is_some(),
                 is_paused = request.is_paused || state_name == "PAUSED",
                 client = playback_client_label(client),
                 "recorded emby playback callback"
@@ -449,6 +529,40 @@ pub(super) async fn handle_emby_playback_event(
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
     }
+}
+
+async fn emby_playback_event_duration_ticks(
+    state: &AppState,
+    principal: AccessPrincipal,
+    item_id: &str,
+    media_source_id: Option<&str>,
+) -> Option<i64> {
+    let catalog = state.catalog.as_ref()?;
+    let item = catalog.find_item(principal, item_id).await.ok().flatten()?;
+    item.runtime_ticks
+        .filter(|ticks| *ticks > 0)
+        .or_else(|| {
+            media_source_id.and_then(|source_id| {
+                item.media_sources
+                    .iter()
+                    .find(|source| source.id == source_id)
+                    .and_then(|source| source.duration_ticks)
+                    .filter(|ticks| *ticks > 0)
+            })
+        })
+        .or_else(|| {
+            item.media_sources
+                .iter()
+                .find(|source| source.is_default)
+                .and_then(|source| source.duration_ticks)
+                .filter(|ticks| *ticks > 0)
+        })
+        .or_else(|| {
+            item.media_sources
+                .iter()
+                .find_map(|source| source.duration_ticks)
+                .filter(|ticks| *ticks > 0)
+        })
 }
 
 pub(super) fn playback_identifier_prefix(value: &str) -> String {
@@ -1661,10 +1775,54 @@ pub(super) async fn handle_emby_user_flag(
             {
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
-            StatusCode::NO_CONTENT.into_response()
+            let user_state = match database.find_user_item_state(&user_id, &item_id).await {
+                Ok(user_state) => user_state,
+                Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            };
+            Json(emby_user_item_data_json(&item_id, user_state.as_ref())).into_response()
         }
         Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
+}
+
+/// Emby's PlayedItems and FavoriteItems mutations return UserItemDataDto, not
+/// an empty 204 response. Some clients deserialize this response immediately
+/// after toggling the state, so keep the response shape aligned with the
+/// public Emby contract.
+fn emby_user_item_data_json(
+    item_id: &str,
+    user_state: Option<&crate::storage::StoredUserItemState>,
+) -> Value {
+    let mut object = serde_json::Map::from_iter([
+        (
+            "PlaybackPositionTicks".to_owned(),
+            json!(
+                user_state
+                    .map(|state| state.position_ticks)
+                    .unwrap_or_default()
+            ),
+        ),
+        (
+            "PlayCount".to_owned(),
+            json!(user_state.map(|state| state.play_count).unwrap_or_default()),
+        ),
+        (
+            "IsFavorite".to_owned(),
+            json!(user_state.map(|state| state.is_favorite).unwrap_or(false)),
+        ),
+        (
+            "Played".to_owned(),
+            json!(user_state.map(|state| state.is_played).unwrap_or(false)),
+        ),
+        ("ItemId".to_owned(), json!(emby_public_id(item_id))),
+        ("Key".to_owned(), json!(emby_public_id(item_id))),
+    ]);
+    if let Some(last_played_at) = user_state.and_then(|state| state.last_played_at)
+        && let Some(last_played_date) = emby_timestamp(last_played_at)
+    {
+        object.insert("LastPlayedDate".to_owned(), json!(last_played_date));
+    }
+    Value::Object(object)
 }
 
 #[derive(Deserialize)]

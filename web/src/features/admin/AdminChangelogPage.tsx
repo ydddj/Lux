@@ -24,6 +24,15 @@ export const changelogReleases: ChangelogRelease[] = [
       { kind: "fixed", items: [
         "修复平铺电影目录中多个 NFO 变体及不可用媒体记录参与身份冲突判断不正确的问题；现在可以识别真实的同目录 NFO 冲突，并忽略已不可用记录。",
         "修复本地 NFO 首映/发行日期未同步到媒体条目索引的问题；日期现在会在索引缺失时写入，并用于后续详情和查询响应。",
+        "修复 Hills 等客户端在 Content-Type: text/plain 下发送 JSON 播放回调导致 Sessions/Playing、Progress 和 Stopped 返回 415 的问题；现在这些回调按 JSON body 兼容解析，非法 JSON 仍返回 400。",
+        "修复无鉴权头的代理媒体请求无法关联播放用户的问题；签名播放地址现在补充标准 UserId 身份提示，同时继续使用绑定条目、媒体源和用户的短期 HMAC 票据完成授权。",
+        "修复复合容器名称生成无效代理播放路径的问题；matroska,webm 等复合值现在使用通用 /Videos/.../stream 入口，不再拼接为带逗号的 URL 后缀。",
+        "修复部分客户端播放回调缺少媒体时长时无法正确记录播放完成状态的问题；现在会优先使用已有会话时长，并从条目或媒体源索引补齐缺失时长。",
+        "修复 Emby 已看和收藏操作返回空 204 导致客户端无法立即读取状态的问题；成功操作现在返回包含 ItemId、Played、IsFavorite、PlayCount 和播放位置的 UserItemDataDto。",
+      ] },
+      { kind: "changed", items: [
+        "兼容第三方播放器的代理播放请求：对 URL/路径型 .strm，Lux 返回标准 AddApiKeyToDirectStreamUrl=true，并将当前 token 写入签名 URL，以兼容播放器实际丢失鉴权的独立媒体请求；本地文件和 SMB/FTP 解析源仍不写入长期 token。",
+        "调整 .strm 代理播放的 UserId 身份提示：现在使用 Lux 登录用户名，兼容按本地用户名映射播放身份的外部代理；内部 UUID 仍只保存在签名 HMAC 票据中，不能由该提示替代授权。",
       ] },
     ],
   },
