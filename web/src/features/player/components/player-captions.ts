@@ -25,6 +25,8 @@ export type PlayerCaptionOption = {
   format?: CaptionFormat;
   renderMode?: PlayerCaptionRenderMode;
   runtimeTrackId?: string;
+  /** Ordinal among supported embedded text tracks, used to match a Matroska TrackEntry. */
+  embeddedOrdinal?: number;
 };
 
 export type PlayerNativeCaptionTrack = {
@@ -49,13 +51,27 @@ export function playerCaptionOptions(
     .filter((stream): stream is MediaStream & { index: number } => Number.isInteger(stream.index) && stream.index >= 0)
     .map((stream) => {
       const format = captionFormat(stream);
-      const runtimeTrack = !stream.isExternal && format ? runtimeTracks[embeddedTextOrdinal++] : undefined;
+      const embeddedOrdinal = !stream.isExternal && format ? embeddedTextOrdinal++ : undefined;
+      const runtimeTrack = embeddedOrdinal === undefined ? undefined : runtimeTracks[embeddedOrdinal];
+      const runtimeMatroskaTrack = runtimeTrack && isMatroskaRuntimeTrack(runtimeTrack.id);
+      const remoteRuntimeCandidate = !runtimeTrack
+        && source?.sourceKind === "STRM_URL"
+        && isHttpUrl(source.externalUrl)
+        && isMatroskaContainer(source.container)
+        && !stream.isExternal
+        && Boolean(format && ["srt", "ass", "ssa"].includes(format));
       const renderMode = runtimeTrack
-        ? (format === "ass" || format === "ssa") && /^(?:mkv:|mkv-track:)/u.test(runtimeTrack.id) ? "runtime-overlay" : "native-inband"
+        ? runtimeMatroskaTrack
+          ? "runtime-overlay"
+          : "native-inband"
+        : remoteRuntimeCandidate
+          ? "runtime-overlay"
         : stream.isExternal && format === "vtt" && nativeTracksSupported
           ? "native"
           : "overlay";
-      const unavailableReason = captionUnavailableReason(source, stream, format, runtimeTrack);
+      const unavailableReason = remoteRuntimeCandidate || runtimeTrack
+        ? undefined
+        : captionUnavailableReason(source, stream, format, runtimeTrack);
       const name = captionName(stream);
       return {
         id: runtimeTrack?.id ?? String(stream.index),
@@ -70,13 +86,15 @@ export function playerCaptionOptions(
         format,
         renderMode,
         runtimeTrackId: runtimeTrack?.id,
+        embeddedOrdinal,
       };
     });
 }
 
 export function defaultCaptionSelection(options: readonly PlayerCaptionOption[]) {
-  return options.find((option) => option.available && option.isDefault)
-    ?? options.find((option) => option.available)
+  const selectableByDefault = options.filter((option) => option.available && !(option.renderMode === "runtime-overlay" && !option.runtimeTrackId));
+  return selectableByDefault.find((option) => option.isDefault)
+    ?? selectableByDefault[0]
     ?? null;
 }
 
@@ -179,4 +197,21 @@ function captionName(stream: MediaStream) {
 function normalizedText(value: string | null | undefined) {
   const normalized = value?.trim();
   return normalized || undefined;
+}
+
+function isHttpUrl(value: string | null | undefined) {
+  try {
+    const protocol = new URL(value ?? "").protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isMatroskaContainer(value: string | null | undefined) {
+  return (value ?? "").toLowerCase().split(",").some((part) => ["mkv", "matroska", "webm"].includes(part.trim()));
+}
+
+function isMatroskaRuntimeTrack(trackId: string) {
+  return /^(?:mkv:|mkv-track:)/u.test(trackId);
 }

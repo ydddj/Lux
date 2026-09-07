@@ -33,6 +33,7 @@ const remoteUrlSource: MediaSource = {
   id: "remote-url-strm",
   sourceKind: "STRM_URL",
   externalUrl: "https://fixture.invalid/media/movie.mkv",
+  container: "mkv",
   streams: [
     { index: 1, type: "VIDEO", codec: "h264" },
     { index: 2, type: "SUBTITLE", codec: "subrip", language: "zho", title: "远程中文", isExternal: false },
@@ -84,10 +85,22 @@ describe("LUX-229 local and remote STRM caption compatibility gate", () => {
     );
   });
 
-  it("keeps URL and path STRM media direct while allowing only an actual native track", () => {
-    for (const source of [remoteUrlSource, remotePathSource]) {
+  it("keeps URL STRM media direct while offering embedded captions through the opt-in pipeline", () => {
+    const remoteUrlOptions = playerCaptionOptions(remoteUrlSource, true);
+    expect(remoteUrlOptions[0]).toEqual(expect.objectContaining({
+      available: true,
+      renderMode: "runtime-overlay",
+      unavailableReason: undefined,
+    }));
+    expect(overlayCaptionSource("fixed-item", remoteUrlSource.id, remoteUrlOptions[0])).toBeNull();
+    expect(nativeCaptionTrack("fixed-item", remoteUrlSource.id, remoteUrlOptions[0])).toBeNull();
+
+    for (const source of [remotePathSource]) {
       const withoutNative = playerCaptionOptions(source, true);
-      expect(withoutNative[0]).toEqual(expect.objectContaining({ available: false }));
+      expect(withoutNative[0]).toEqual(expect.objectContaining({
+        available: false,
+        unavailableReason: "浏览器未暴露远程内嵌字幕",
+      }));
       expect(overlayCaptionSource("fixed-item", source.id, withoutNative[0])).toBeNull();
       expect(nativeCaptionTrack("fixed-item", source.id, withoutNative[0])).toBeNull();
       expect(withoutNative[1]).toEqual(expect.objectContaining({ available: false }));

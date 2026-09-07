@@ -29,7 +29,8 @@ import { normalizeCaptionOffset } from "./caption-offset";
 import type { LuxCaptionCue } from "./caption-parser";
 import { HlsVideoEngine } from "./hls-playback-engine";
 import { canUseHls } from "./hls-capabilities";
-import { isRemoteHttpStrmSource, shouldUseClientHevc, shouldUseClientMkv } from "./playback-selection";
+import { canUseRemoteMkvCaptionSidecar, isRemoteHttpStrmSource, remoteMatroskaRangeUrl, shouldUseClientHevc, shouldUseClientMkv } from "./playback-selection";
+import { RemoteMkvCaptionReader } from "./remote-mkv-caption-reader";
 import { LegacyPlaybackEngineAdapter } from "./core/legacy-engine-adapter";
 import { LuxPlayerRuntime } from "./core/player-runtime";
 import { PlayerControls } from "./components/player-controls";
@@ -69,6 +70,13 @@ const PROGRESS_REPORT_INTERVAL_MS = 10_000;
 const TIMELINE_UI_UPDATE_INTERVAL_MS = 100;
 const AUTO_HIDE_DELAY_MS = 3_000;
 const PLAYBACK_SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+
+type PlaybackEngineHandoff = {
+  playbackKey: string;
+  sourceId: string;
+  currentTime: number;
+  playing: boolean;
+};
 
 const HEVC_RUNTIME_ASSETS = {
   workerUrl: "/hevc/transcode-worker.js",
@@ -271,7 +279,10 @@ export function PlayerPage() {
   const nativeCaptionTracksSupported = typeof HTMLTrackElement !== "undefined";
   const captionOptions = playerCaptionOptions(source, nativeCaptionTracksSupported, nativeCaptionTracks);
   const selectedCaptionOption = captionSourceId === source?.id
-    ? captionOptions.find((caption) => caption.id === selectedCaptionId && caption.available) ?? null
+    ? captionOptions.find((caption) => (
+      (caption.id === selectedCaptionId || String(caption.streamIndex) === selectedCaptionId)
+      && caption.available
+    )) ?? null
     : null;
   const captionTrack = nativeCaptionTrack(itemId, source?.id ?? "", selectedCaptionOption);
   const captionOverlaySource = overlayCaptionSource(itemId, source?.id ?? "", selectedCaptionOption);
@@ -315,12 +326,28 @@ export function PlayerPage() {
     ? webPlaybackSession.data
     : playbackBootstrap.data?.session ?? webPlaybackSession.data;
   const playbackPlan = playbackSession?.plan;
+  const remoteHttpSource = Boolean(source && isRemoteHttpStrmSource(source));
   const directProxyUrl = playbackPlan?.type === "DIRECT" ? playbackPlan.proxyUrl : undefined;
+  const directRangeUrl = playbackPlan?.type === "DIRECT" ? playbackPlan.rangeUrl : undefined;
+  const remoteMatroskaRelayUrl = remoteMatroskaRangeUrl(source, directRangeUrl);
   const streamUrl = playbackPlan?.type === "DIRECT"
-    ? (directProxyFallbackRequested ? playbackPlan.url : directProxyUrl ?? playbackPlan.url)
+    ? (directProxyFallbackRequested
+      ? playbackPlan.url
+      : remoteMatroskaRelayUrl ?? directProxyUrl ?? playbackPlan.url)
     : playbackPlan?.type === "SERVER_HLS"
       ? playbackPlan.manifestUrl
       : "";
+  const remoteCaptionRequested = remoteHttpSource
+    && Boolean(
+      selectedCaptionOption
+      && selectedCaptionOption.renderMode === "runtime-overlay",
+  );
+  const clientMkvSourceUrl = playbackPlan?.type === "DIRECT"
+    ? playbackPlan.rangeUrl ?? null
+    : null;
+  const remoteCaptionSidecarRequested = remoteCaptionRequested
+    && canUseRemoteMkvCaptionSidecar(source)
+    && Boolean(clientMkvSourceUrl);
   const poster = media ? imageUrl(media, "fanart") ?? imageUrl(media) : null;
   const chapterTimeline = useMemo(
     () => normalizePlayerChapters(source?.chapters, duration),
@@ -348,6 +375,8 @@ export function PlayerPage() {
   const sessionTransitionRef = useRef(Promise.resolve());
   const fallbackGenerationRef = useRef(0);
   const captionSelectionTouchedRef = useRef(false);
+  const remoteCaptionReaderRef = useRef<RemoteMkvCaptionReader | null>(null);
+  const playbackEngineHandoffRef = useRef<PlaybackEngineHandoff | null>(null);
   const airPlay = usePlayerAirPlay(airPlayVideo, playbackKey);
 
   const setVideoRef = useCallback((video: HTMLVideoElement | null) => {
@@ -428,12 +457,6 @@ export function PlayerPage() {
   }, []);
 
   const requestServerFallback = useCallback(async (reason?: unknown) => {
-    const remoteClientMkv = isRemoteHttpStrmSource(source) && isMatroskaSource(source);
-    if (remoteClientMkv) {
-      setFailedStreamUrl(streamUrl || null);
-      setPlaybackFailure(classifyPlayerEngineFailure(reason));
-      return;
-    }
     if (
       playbackPlan?.type === "DIRECT"
       && directProxyUrl
@@ -465,7 +488,7 @@ export function PlayerPage() {
     setPlaybackFailure(null);
     setFailedStreamUrl(null);
     setPlaybackAttempt(1);
-  }, [directProxyFallbackRequested, directProxyUrl, playbackAttempt, playbackPlan?.type, source, stopActiveSession, streamUrl]);
+  }, [directProxyFallbackRequested, directProxyUrl, playbackAttempt, playbackPlan?.type, stopActiveSession, streamUrl]);
 
   useEffect(() => {
     fallbackGenerationRef.current += 1;
@@ -619,12 +642,34 @@ export function PlayerPage() {
       bufferedEndRef.current = next.bufferedEnd;
       timelineScheduler.schedule(next, immediate);
     };
+    const restoreEngineHandoff = async () => {
+      const handoff = playbackEngineHandoffRef.current;
+      if (
+        !handoff
+        || handoff.playbackKey !== playbackKey
+        || handoff.sourceId !== (source?.id ?? "")
+      ) {
+        return;
+      }
+      playbackEngineHandoffRef.current = null;
+      if (Number.isFinite(handoff.currentTime) && handoff.currentTime >= 0) {
+        currentTimeRef.current = handoff.currentTime;
+        setCurrentTime(handoff.currentTime);
+        activeEngine.seek(handoff.currentTime);
+      }
+      if (handoff.playing) {
+        await activeEngine.play().catch(() => undefined);
+      } else {
+        activeEngine.pause();
+      }
+    };
     const removeRuntimeSubscription = runtime.subscribeEvents((event) => {
       if (cancelled) return;
       switch (event.type) {
         case "SOURCE_READY":
           syncSnapshot(event.snapshot, true);
           restorePlaybackPosition();
+          void restoreEngineHandoff();
           break;
         case "PLAYING":
           hasStartedRef.current = true;
@@ -707,8 +752,9 @@ export function PlayerPage() {
           activeEngine = new HlsVideoEngine(initialEngine.element);
           engineRef.current = activeEngine;
         } else {
-          const remoteHttpStrm = isRemoteHttpStrmSource(source);
+          const remoteHttpStrm = remoteHttpSource;
           const useMkvFallback = isMatroskaSource(source)
+            && !remoteHttpStrm
             ? await shouldUseClientMkv(source, initialEngine.element)
             : false;
           const useHevcFallback =
@@ -735,6 +781,9 @@ export function PlayerPage() {
           }
         }
         if (cancelled) return;
+        const engineSource = useClientEngine(activeEngine)
+          ? clientMkvSourceUrl ?? streamUrl
+          : streamUrl;
         await runtime.load(
           new LegacyPlaybackEngineAdapter(
             activeEngine,
@@ -742,10 +791,11 @@ export function PlayerPage() {
           ),
           {
             id: source?.id ?? "",
-            url: streamUrl,
+            url: engineSource,
             poster,
           },
         );
+        if (!cancelled) await restoreEngineHandoff();
         if (!cancelled && activeEngine.performance)
           handlePerformance(
             new CustomEvent(PLAYBACK_PERFORMANCE_EVENT, {
@@ -755,7 +805,7 @@ export function PlayerPage() {
       } catch (cause) {
         if (!cancelled) {
           if (runtime.state.status === "FAILED") return;
-          if (playbackPlan?.type === "DIRECT" && !(isRemoteHttpStrmSource(source) && isMatroskaSource(source))) {
+          if (playbackPlan?.type === "DIRECT") {
             requestServerFallback(cause);
           } else {
             setFailedStreamUrl(streamUrl);
@@ -769,6 +819,23 @@ export function PlayerPage() {
     void load();
     return () => {
       cancelled = true;
+      if (remoteHttpSource && source?.id) {
+        const video = activeEngine.element;
+        const currentTime = Number.isFinite(video.currentTime)
+          ? Math.max(0, video.currentTime)
+          : currentTimeRef.current;
+        if (
+          playbackEngineHandoffRef.current?.playbackKey !== playbackKey
+          || playbackEngineHandoffRef.current?.sourceId !== source.id
+        ) {
+          playbackEngineHandoffRef.current = {
+            playbackKey,
+            sourceId: source.id,
+            currentTime,
+            playing: !video.paused && !video.ended,
+          };
+        }
+      }
       timelineScheduler.dispose();
       initialEngine.element.removeEventListener("durationchange", handleDurationChange);
       performanceElement?.removeEventListener(PLAYBACK_PERFORMANCE_EVENT, handlePerformance);
@@ -777,7 +844,7 @@ export function PlayerPage() {
       if (runtimeRef.current === runtime) runtimeRef.current = null;
       if (engineRef.current === activeEngine) engineRef.current = null;
     };
-  }, [playbackKey, playbackPlan?.type, poster, requestServerFallback, source, streamUrl]);
+  }, [playbackKey, playbackPlan?.type, poster, remoteHttpSource, requestServerFallback, source, streamUrl]);
 
   // Fullscreen change listener
   useEffect(() => {
@@ -934,7 +1001,7 @@ export function PlayerPage() {
     setSelectedCaptionId(option.id);
     setCaptionStatus(option.renderMode === "native-inband" ? null : "字幕加载中…");
     resetControlsTimeout();
-  }, [captionOptions, resetControlsTimeout, source?.id]);
+  }, [captionOptions, remoteHttpSource, resetControlsTimeout, source]);
 
   const handleRuntimeCaptionCue = useCallback((cue: {
     trackId: string;
@@ -947,6 +1014,7 @@ export function PlayerPage() {
     style?: { color?: string; bold?: boolean; italic?: boolean; marginL?: number; marginR?: number; marginV?: number };
     runs?: readonly { text: string; color?: string; bold?: boolean; italic?: boolean }[];
   }) => {
+    setCaptionStatus(null);
     const next: LuxCaptionCue = {
       id: `${cue.trackId}:${cue.startMs}:${cue.endMs}:${cue.layer ?? 0}:${cue.text.slice(0, 16)}`,
       start: cue.startMs / 1000,
@@ -960,6 +1028,64 @@ export function PlayerPage() {
     };
     setRuntimeCaptionCues((previous) => previous.some((entry) => entry.id === next.id) ? previous : [...previous, next]);
   }, []);
+
+  useEffect(() => {
+    setRuntimeCaptionCues([]);
+    if (
+      !remoteCaptionSidecarRequested
+      || !clientMkvSourceUrl
+      || !selectedCaptionOption
+      || selectedCaptionOption.renderMode !== "runtime-overlay"
+    ) {
+      remoteCaptionReaderRef.current?.destroy();
+      remoteCaptionReaderRef.current = null;
+      return;
+    }
+    let active = true;
+    const reader = new RemoteMkvCaptionReader({
+      source: clientMkvSourceUrl,
+      selection: {
+        id: selectedCaptionOption.id,
+        name: selectedCaptionOption.name,
+        language: selectedCaptionOption.language,
+        format: selectedCaptionOption.format,
+        ordinal: selectedCaptionOption.embeddedOrdinal,
+      },
+      currentTime: () => videoRef.current?.currentTime ?? currentTimeRef.current,
+      onReady: () => {
+        if (active) setCaptionStatus(null);
+      },
+      onCue: (cue) => {
+        if (!active) return;
+        handleRuntimeCaptionCue({
+          trackId: selectedCaptionOption.id,
+          startMs: cue.start * 1000,
+          endMs: cue.end * 1000,
+          text: cue.text,
+          layer: cue.layer,
+          alignment: cue.alignment,
+          position: cue.position,
+          style: cue.style,
+          runs: cue.runs,
+        });
+      },
+      onError: (error) => {
+        if (active) setCaptionStatus(`远程字幕不可用：${error.message}`);
+      },
+    });
+    remoteCaptionReaderRef.current = reader;
+    void reader.start();
+    return () => {
+      active = false;
+      reader.destroy();
+      if (remoteCaptionReaderRef.current === reader) remoteCaptionReaderRef.current = null;
+      setRuntimeCaptionCues([]);
+    };
+  }, [clientMkvSourceUrl, handleRuntimeCaptionCue, playbackKey, remoteCaptionSidecarRequested, selectedCaptionOption?.embeddedOrdinal, selectedCaptionOption?.format, selectedCaptionOption?.id, selectedCaptionOption?.language, selectedCaptionOption?.name, selectedCaptionOption?.renderMode]);
+
+  useEffect(() => {
+    remoteCaptionReaderRef.current?.setTime(currentTime);
+  }, [currentTime]);
 
   const changeCaptionOffset = useCallback((offset: number) => {
     setCaptionOffset(normalizeCaptionOffset(offset));
@@ -1248,7 +1374,7 @@ export function PlayerPage() {
     >
       <PlayerVideoSurface
         streamUrl={streamUrl}
-        deferNativeSource={isMatroskaSource(source)}
+        deferNativeSource={isMatroskaSource(source) && !remoteHttpSource}
         corsEnabled={source?.sourceKind !== "STRM_URL"}
         poster={poster}
         title={mediaTitle(media)}
@@ -1412,4 +1538,8 @@ export function PlayerPage() {
 
 function isMatroskaSource(source: MediaSource | undefined) {
   return (source?.container ?? "").toLowerCase().split(",").some((part) => part.trim() === "mkv" || part.trim() === "matroska" || part.trim() === "webm");
+}
+
+function useClientEngine(engine: PlaybackEngine) {
+  return engine.kind === "client-mkv" || engine.kind === "client-hevc";
 }

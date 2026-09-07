@@ -272,7 +272,7 @@ export type WebPlaybackCapabilities = {
 };
 
 export type WebPlaybackPlan =
-  | { type: "DIRECT"; url: string; proxyUrl?: string | null }
+  | { type: "DIRECT"; url: string; proxyUrl?: string | null; rangeUrl?: string | null }
   | { type: "SERVER_HLS"; manifestUrl: string; tier: number }
   | { type: "UNSUPPORTED"; reason: string };
 
@@ -714,6 +714,37 @@ export type AdminScheduledTask = {
 
 export type AdminScheduledTaskPage = {
   scheduledTasks?: AdminScheduledTask[];
+  total?: number;
+  page?: number;
+  pageSize?: number;
+};
+
+export type AdminScheduledTaskPlanLibrary = {
+  id: string;
+  name: string;
+};
+
+export type AdminScheduledTaskPlan = {
+  id: string;
+  taskType: string;
+  name: string;
+  taskName?: string | null;
+  description?: string | null;
+  sourceType?: "SYSTEM" | "PLUGIN" | string;
+  pluginId?: string | null;
+  schedule?: string | null;
+  isEnabled: boolean;
+  resourceLimit?: Record<string, unknown>;
+  scopeType?: "GLOBAL" | "LIBRARY" | string;
+  isDefault?: boolean;
+  libraries?: AdminScheduledTaskPlanLibrary[];
+  libraryCount?: number;
+  createdAt?: string | number;
+  updatedAt?: string | number;
+};
+
+export type AdminScheduledTaskPlanPage = {
+  plans?: AdminScheduledTaskPlan[];
   total?: number;
   page?: number;
   pageSize?: number;

@@ -100,6 +100,46 @@ describe("LuxPlayer caption selection", () => {
     expect(overlayCaptionSource("item", "remote-strm", options[0])).toBeNull();
   });
 
+  it("offers remote Matroska text captions through the opt-in client pipeline", () => {
+    const options = playerCaptionOptions({
+      id: "remote-mkv",
+      sourceKind: "STRM_URL",
+      externalUrl: "https://media.example.test/video.mkv",
+      container: "matroska,webm",
+      streams: [{ index: 2, type: "SUBTITLE", codec: "subrip", title: "远程文本", isExternal: false, isDefault: true }],
+    }, true);
+
+    expect(options[0]).toEqual(expect.objectContaining({
+      available: true,
+      renderMode: "runtime-overlay",
+      unavailableReason: undefined,
+      isDefault: true,
+    }));
+    expect(defaultCaptionSelection(options)).toBeNull();
+  });
+
+  it("keeps a discovered remote Matroska SRT track on the runtime overlay", () => {
+    const options = playerCaptionOptions({
+      id: "remote-mkv",
+      sourceKind: "STRM_URL",
+      externalUrl: "https://media.example.test/video.mkv",
+      container: "matroska,webm",
+      streams: [{ index: 2, type: "SUBTITLE", codec: "subrip", title: "远程文本", isExternal: false, isDefault: true }],
+    }, true, [{
+      id: "mkv:42",
+      label: "远程文本",
+      language: "zho",
+      kind: "subtitles",
+      ordinal: 0,
+    }]);
+
+    expect(options[0]).toEqual(expect.objectContaining({
+      id: "mkv:42",
+      renderMode: "runtime-overlay",
+      available: true,
+    }));
+  });
+
   it("maps runtime tracks only across supported embedded text streams", () => {
     const options = playerCaptionOptions({
       id: "local-mkv",

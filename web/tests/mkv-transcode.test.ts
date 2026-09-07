@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { createFile } from "mp4box";
-import { addHevcTrack, hevcCodecString, makeAacEsdsData, matroskaTimestampTicks, toLengthPrefixed } from "../src/features/player/mkv-remux";
-import { encodedVideoDurationTicks, isSupportedMatroskaAudio, isSupportedMatroskaVideo, matroskaAudioConfig, toAnnexB } from "../src/features/player/mkv-transcode";
+import { addHevcTrack, hevcCodecString, makeAacEsdsData, matroskaTimestampTicks, matroskaVideoCodecString, toLengthPrefixed } from "../src/features/player/mkv-remux";
+import { encodedVideoDurationTicks, isSupportedMatroskaAudio, isSupportedMatroskaVideo, matroskaAudioConfig, matroskaSampleRoute, toAnnexB } from "../src/features/player/mkv-transcode";
 
 describe("MKV transcode input", () => {
+  it("routes subtitle samples before remux samples", () => {
+    const subtitleTrack = { number: 4, type: "subtitle", codecId: "S_TEXT/UTF8" } as const;
+    const subtitles = new Map([[subtitleTrack.number, subtitleTrack]]);
+
+    expect(matroskaSampleRoute(4, subtitles, true)).toBe("subtitle");
+    expect(matroskaSampleRoute(1, subtitles, true)).toBe("remux");
+    expect(matroskaSampleRoute(1, subtitles, false)).toBe("decode");
+  });
+
   it("accepts the supported Matroska video and audio codecs", () => {
     expect(isSupportedMatroskaVideo({ codecId: "V_MPEGH/ISO/HEVC", codecPrivate: new Uint8Array([1]) })).toBe(true);
     expect(isSupportedMatroskaVideo({ codecId: "V_MPEG4/ISO/AVC", codecPrivate: new Uint8Array([1]) })).toBe(true);
@@ -69,6 +78,7 @@ describe("MKV transcode input", () => {
     hvcC[1] = 2;
     hvcC[12] = 153;
     expect(hevcCodecString(hvcC)).toBe("hvc1.2.4.L153.B0");
+    expect(matroskaVideoCodecString({ codecId: "V_MPEGH/ISO/HEVC", codecPrivate: hvcC })).toBe("hvc1.2.4.L153.B0");
     expect(matroskaTimestampTicks(1_234.5, 90_000)).toBe(111_105);
   });
 

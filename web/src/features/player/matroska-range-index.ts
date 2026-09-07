@@ -39,6 +39,13 @@ export type MatroskaRangeIndex = {
   cues: MatroskaCue[];
 };
 
+export type MatroskaIndexMetadata = {
+  segmentOffset: number;
+  segmentDataOffset: number;
+  segmentEnd: number | null;
+  cuesOffset: number;
+};
+
 export class MatroskaIndexError extends Error {
   constructor(message: string) {
     super(message);
@@ -48,10 +55,17 @@ export class MatroskaIndexError extends Error {
 
 /** Validates the required index anchor without scanning Cluster payloads. */
 export function hasMatroskaSeekHead(data: Uint8Array, totalLength = data.byteLength) {
-  const segment = findElement(data, 0, data.byteLength, IDS.segment);
+  // The first Range is only a prefix of the file. A finite Segment size may
+  // therefore extend beyond the bytes we have, while its SeekHead is already
+  // available near the beginning. Keep strict bounds for the full index
+  // parser, but allow this lightweight anchor check to inspect a clipped
+  // outer Segment element.
+  const segment = findElement(data, 0, data.byteLength, IDS.segment, 0, true);
   if (!segment) return false;
-  const seekHead = findDirectChild(data, segment.dataStart, Math.min(segment.dataEnd, data.byteLength), IDS.seekHead);
-  const cuesPosition = seekHead ? parseSeekHead(data, seekHead.dataStart, seekHead.dataEnd).find((entry) => entry.id === IDS.cues)?.position : undefined;
+  const seekHead = findDirectChild(data, segment.dataStart, Math.min(segment.dataEnd, data.byteLength), IDS.seekHead, true);
+  const cuesPosition = seekHead
+    ? parseSeekHead(data, seekHead.dataStart, seekHead.dataEnd, true).find((entry) => entry.id === IDS.cues)?.position
+    : undefined;
   return cuesPosition !== undefined && Number.isSafeInteger(cuesPosition)
     && segment.dataStart + cuesPosition >= segment.dataStart
     && segment.dataStart + cuesPosition < totalLength;
@@ -61,32 +75,65 @@ type Element = { id: number; start: number; dataStart: number; dataEnd: number; 
 
 export function parseMatroskaRangeIndex(data: Uint8Array, totalLength = data.byteLength, videoTrack?: number): MatroskaRangeIndex {
   if (totalLength < data.byteLength) throw new MatroskaIndexError("Matroska 索引长度不一致");
-  const segment = findElement(data, 0, data.byteLength, IDS.segment);
+  const metadata = locateMatroskaIndex(data, totalLength);
+  const cuesOffset = metadata.cuesOffset;
+  const cues = findElement(data, cuesOffset, data.byteLength, IDS.cues);
+  if (!cues || cues.dataEnd > totalLength) throw new MatroskaIndexError("Cues 尚未完整读取");
+  if (cues.dataEnd - cues.dataStart > MAX_METADATA_BYTES) throw new MatroskaIndexError("Cues 元数据超限");
+  const parsed = parseCues(data, cues.dataStart, cues.dataEnd, metadata.segmentDataOffset, totalLength, videoTrack);
+  if (parsed.length === 0) throw new MatroskaIndexError("Cues 不包含关键帧位置");
+  return {
+    ...metadata,
+    cuesOffset,
+    cuesEnd: cues.end,
+    cues: parsed,
+  };
+}
+
+/** Locates the Segment-relative Cues position from a bounded metadata range. */
+export function locateMatroskaIndex(data: Uint8Array, totalLength = data.byteLength): MatroskaIndexMetadata {
+  const segment = findElement(data, 0, data.byteLength, IDS.segment, 0, true);
   if (!segment) throw new MatroskaIndexError("Matroska 缺少 Segment");
   const segmentEnd = segment.unknown ? null : segment.dataEnd;
-  const seekHead = findDirectChild(data, segment.dataStart, Math.min(segment.dataEnd, data.byteLength), IDS.seekHead);
+  const seekHead = findDirectChild(data, segment.dataStart, Math.min(segment.dataEnd, data.byteLength), IDS.seekHead, true);
   if (!seekHead) throw new MatroskaIndexError("Matroska 缺少有效 SeekHead");
   if (seekHead.dataEnd - seekHead.dataStart > MAX_METADATA_BYTES) throw new MatroskaIndexError("SeekHead 元数据超限");
-  const seekEntries = parseSeekHead(data, seekHead.dataStart, seekHead.dataEnd);
-  const cuesPosition = seekEntries.find((entry) => entry.id === IDS.cues)?.position;
+  const cuesPosition = parseSeekHead(data, seekHead.dataStart, seekHead.dataEnd, true).find((entry) => entry.id === IDS.cues)?.position;
   if (cuesPosition === undefined) throw new MatroskaIndexError("SeekHead 缺少 Cues 位置");
   const cuesOffset = segment.dataStart + cuesPosition;
   if (!Number.isSafeInteger(cuesOffset) || cuesOffset < segment.dataStart || cuesOffset >= totalLength) {
     throw new MatroskaIndexError("Cues 偏移越界");
   }
-  const cues = findElement(data, cuesOffset, data.byteLength, IDS.cues);
-  if (!cues || cues.dataEnd > totalLength) throw new MatroskaIndexError("Cues 尚未完整读取");
-  if (cues.dataEnd - cues.dataStart > MAX_METADATA_BYTES) throw new MatroskaIndexError("Cues 元数据超限");
-  const parsed = parseCues(data, cues.dataStart, cues.dataEnd, segment.dataStart, totalLength, videoTrack);
-  if (parsed.length === 0) throw new MatroskaIndexError("Cues 不包含关键帧位置");
   return {
     segmentOffset: segment.start,
     segmentDataOffset: segment.dataStart,
     segmentEnd,
     cuesOffset,
-    cuesEnd: cues.end,
-    cues: parsed,
   };
+}
+
+/** Parses a Cues element fetched as a separate absolute Range. */
+export function parseMatroskaCuesRange(
+  data: Uint8Array,
+  rangeStart: number,
+  totalLength: number,
+  metadata: MatroskaIndexMetadata,
+  videoTrack?: number,
+) {
+  if (!Number.isSafeInteger(rangeStart) || rangeStart < 0 || rangeStart > metadata.cuesOffset) {
+    throw new MatroskaIndexError("Cues Range 起点无效");
+  }
+  const localOffset = metadata.cuesOffset - rangeStart;
+  const cues = findElement(data, localOffset, data.byteLength, IDS.cues);
+  if (!cues || cues.dataEnd > data.byteLength) throw new MatroskaIndexError("Cues 尚未完整读取");
+  if (cues.dataEnd - cues.dataStart > MAX_METADATA_BYTES) throw new MatroskaIndexError("Cues 元数据超限");
+  const parsed = parseCues(data, cues.dataStart, cues.dataEnd, metadata.segmentDataOffset, totalLength, videoTrack);
+  if (parsed.length === 0) throw new MatroskaIndexError("Cues 不包含关键帧位置");
+  return {
+    ...metadata,
+    cuesEnd: rangeStart + cues.end,
+    cues: parsed,
+  } satisfies MatroskaRangeIndex;
 }
 
 export function cueForTime(index: MatroskaRangeIndex, timecode: number, track: number) {
@@ -98,7 +145,7 @@ export function cueForTime(index: MatroskaRangeIndex, timecode: number, track: n
   return candidate;
 }
 
-function parseSeekHead(data: Uint8Array, start: number, end: number) {
+function parseSeekHead(data: Uint8Array, start: number, end: number, allowTruncated = false) {
   const entries: Array<{ id: number; position: number }> = [];
   forEachElement(data, start, end, (element) => {
     if (element.id !== IDS.seek) return;
@@ -107,9 +154,9 @@ function parseSeekHead(data: Uint8Array, start: number, end: number) {
     forEachElement(data, element.dataStart, element.dataEnd, (child) => {
       if (child.id === IDS.seekId) id = readUnsigned(data, child.dataStart, child.dataEnd);
       if (child.id === IDS.seekPosition) position = readUnsigned(data, child.dataStart, child.dataEnd);
-    }, 1);
+    }, 1, allowTruncated);
     if (id !== null && position !== null) entries.push({ id, position });
-  }, 1);
+  }, 1, allowTruncated);
   return entries;
 }
 
@@ -141,38 +188,45 @@ function parseCues(data: Uint8Array, start: number, end: number, segmentDataOffs
   return cues.sort((left, right) => left.timecode - right.timecode || left.track - right.track);
 }
 
-function findDirectChild(data: Uint8Array, start: number, end: number, id: number) {
-  return findElement(data, start, end, id, 1);
+function findDirectChild(data: Uint8Array, start: number, end: number, id: number, allowTruncated = false) {
+  return findElement(data, start, end, id, 1, allowTruncated);
 }
 
-function findElement(data: Uint8Array, start: number, end: number, id: number, depth = 0): Element | null {
+function findElement(data: Uint8Array, start: number, end: number, id: number, depth = 0, allowTruncated = false): Element | null {
   let found: Element | null = null;
   forEachElement(data, start, end, (element) => {
     if (found === null && element.id === id) found = element;
-  }, depth);
+  }, depth, allowTruncated);
   return found;
 }
 
-function forEachElement(data: Uint8Array, start: number, end: number, callback: (element: Element) => void, depth: number) {
+function forEachElement(data: Uint8Array, start: number, end: number, callback: (element: Element) => void, depth: number, allowTruncated = false) {
   if (depth > MAX_DEPTH) throw new MatroskaIndexError("EBML 嵌套层级超限");
   let offset = start;
   while (offset < end) {
-    const element = readElement(data, offset, end);
-    if (!element || element.end <= offset) throw new MatroskaIndexError("EBML 元素边界无效");
+    const element = readElement(data, offset, end, allowTruncated);
+    if (!element || element.end <= offset) {
+      if (allowTruncated) break;
+      throw new MatroskaIndexError("EBML 元素边界无效");
+    }
     callback(element);
     offset = element.end;
   }
-  if (offset !== end) throw new MatroskaIndexError("EBML 元素未对齐");
+  if (offset !== end && !allowTruncated) throw new MatroskaIndexError("EBML 元素未对齐");
 }
 
-function readElement(data: Uint8Array, offset: number, end: number): Element | null {
+function readElement(data: Uint8Array, offset: number, end: number, allowTruncated = false): Element | null {
   const id = readVint(data, offset, end, false);
   if (!id) return null;
   const size = readVint(data, id.next, end, true);
   if (!size) return null;
   const dataStart = size.next;
   const dataEnd = size.unknown ? end : dataStart + size.value;
-  if (dataEnd > end || dataEnd < dataStart) throw new MatroskaIndexError("EBML 元素越界");
+  if (dataEnd < dataStart) throw new MatroskaIndexError("EBML 元素越界");
+  if (dataEnd > end) {
+    if (!allowTruncated) throw new MatroskaIndexError("EBML 元素越界");
+    return { id: id.value, start: offset, dataStart, dataEnd: end, end, unknown: true };
+  }
   return { id: id.value, start: offset, dataStart, dataEnd, end: dataEnd, unknown: Boolean(size.unknown) };
 }
 
