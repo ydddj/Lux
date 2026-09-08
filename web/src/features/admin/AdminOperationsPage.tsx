@@ -15,6 +15,7 @@ import {
   RotateCcw,
   Save,
   StopCircle,
+  Trash2,
   X,
 } from "lucide-react";
 import { useMemo, useState, type FormEvent, type ReactNode } from "react";
@@ -96,6 +97,7 @@ const AUDIT_EVENT_LABELS: Record<string, string> = {
   LIBRARY_ROOT_DELETED: "删除媒体库路径",
   LIBRARY_DELETED: "删除媒体库",
   SCHEDULE_UPDATED: "更新计划任务",
+  SCHEDULE_PLAN_DELETED: "删除执行计划",
   LIBRARY_COVER_GENERATION_STARTED: "开始生成媒体库封面",
   STRM_PROBE_STARTED: "开始 STRM 媒体信息扫描",
   STRM_PROBE_CANCEL_REQUESTED: "取消 STRM 媒体信息扫描",
@@ -260,7 +262,12 @@ export function AdminOperationsPage() {
     })),
   ].sort(compareOperationsJobs);
   const registeredTasks = tasks.data?.scheduledTasks ?? [];
-  const registeredPlans = taskPlans.data?.plans ?? [];
+  const allRegisteredPlans = taskPlans.data?.plans ?? [];
+  const registeredPlans = allRegisteredPlans.filter((plan) => !isEmptyDefaultLibraryPlan(plan));
+  const hiddenPlanCount = allRegisteredPlans.length - registeredPlans.length;
+  const registeredPlanTotal = taskPlans.data?.total == null
+    ? registeredPlans.length
+    : Math.max(registeredPlans.length, taskPlans.data.total - hiddenPlanCount);
   const logItems = useMemo(() => {
     const query = logSearch.trim().toLowerCase();
     return (logs.data?.events ?? []).filter((log) => {
@@ -321,14 +328,14 @@ export function AdminOperationsPage() {
       {logs.error ? <p className="lux-error-copy" role="alert">系统日志加载失败：{logs.error.message}</p> : null}
 
       <section className="lux-operations-summary" aria-label="任务概览">
-        <OperationsStat label="已注册任务" value={usingPlans ? taskPlans.data?.total ?? registeredPlans.length : tasks.data?.total ?? registeredTasks.length} detail="系统与插件提供" icon={<ClipboardList size={18} />} />
+        <OperationsStat label="已注册任务" value={usingPlans ? registeredPlanTotal : tasks.data?.total ?? registeredTasks.length} detail="系统与插件提供" icon={<ClipboardList size={18} />} />
         <OperationsStat label="已启用" value={enabledCount} detail="已配置执行计划" icon={<CheckCircle2 size={18} />} />
         <OperationsStat label="正在运行" value={runningCount} detail="实时运行记录" icon={<RefreshCw size={18} />} />
         <OperationsStat label="失败记录" value={failedCount} detail="需要关注" icon={<AlertTriangle size={18} />} tone={failedCount ? "warn" : "default"} />
       </section>
 
       <nav className="lux-operations-tabs" aria-label="任务与日志分区" role="tablist">
-        <OperationsTabButton active={tab === "registered"} onClick={() => setTab("registered")} label="已注册任务" count={usingPlans ? taskPlans.data?.total ?? registeredPlans.length : tasks.data?.total ?? 0} />
+        <OperationsTabButton active={tab === "registered"} onClick={() => setTab("registered")} label="已注册任务" count={usingPlans ? registeredPlanTotal : tasks.data?.total ?? 0} />
         <OperationsTabButton active={tab === "runs"} onClick={() => setTab("runs")} label="运行记录" count={jobItems.length} />
         <OperationsTabButton active={tab === "logs"} onClick={() => setTab("logs")} label="系统日志" count={logItems.length} />
       </nav>
@@ -339,7 +346,7 @@ export function AdminOperationsPage() {
           libraries={libraries.data?.libraries ?? []}
           page={taskPlanPage}
           pageSize={taskPlans.data?.pageSize ?? 50}
-          total={taskPlans.data?.total ?? registeredPlans.length}
+          total={registeredPlanTotal}
           search={taskPlanSearch}
           onSearchChange={(value) => { setTaskPlanSearch(value); setTaskPlanPage(1); }}
           onPageChange={setTaskPlanPage}
@@ -470,7 +477,18 @@ function RegisteredPlansSection({
               <span>{taskPlans.length} 个执行计划</span>
             </div>
             <div className="lux-registered-task-list">
-              {taskPlans.map((plan) => <ScheduledTaskPlanRow key={plan.id} plan={plan} libraries={libraries} onSaved={onRefresh} />)}
+              {taskPlans.map((plan) => <ScheduledTaskPlanRow
+                key={plan.id}
+                plan={plan}
+                libraries={libraries}
+                onSaved={onRefresh}
+                onDeleted={() => {
+                  const remainingTotal = Math.max(0, total - 1);
+                  const lastAvailablePage = Math.max(1, Math.ceil(remainingTotal / pageSize));
+                  onPageChange(Math.min(page, lastAvailablePage));
+                  onRefresh();
+                }}
+              />)}
             </div>
           </section>
         ))}
@@ -484,7 +502,7 @@ function RegisteredPlansEmpty({ creating }: { creating: boolean }) {
   return <div className="lux-operations-empty" role="status"><span className="lux-operations-empty-icon"><Inbox size={22} /></span><div><strong>{creating ? "请选择任务类型和媒体库" : "还没有执行计划"}</strong><p>{creating ? "新建计划后，同一任务类型下的多个媒体库可以共用时间，也可以继续拆成不同时间的计划。" : "系统功能或插件注册后台工作后，执行计划会显示在这里。"}</p></div></div>;
 }
 
-function ScheduledTaskPlanRow({ plan, libraries, onSaved }: { plan: AdminScheduledTaskPlan; libraries: AdminLibrary[]; onSaved: () => void }) {
+function ScheduledTaskPlanRow({ plan, libraries, onSaved, onDeleted }: { plan: AdminScheduledTaskPlan; libraries: AdminLibrary[]; onSaved: () => void; onDeleted: () => void }) {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [schedule, setSchedule] = useState(plan.schedule ?? "");
@@ -529,6 +547,17 @@ function ScheduledTaskPlanRow({ plan, libraries, onSaved }: { plan: AdminSchedul
   const configured = Boolean(plan.schedule);
   const stateLabel = plan.isEnabled && configured ? "已启用" : configured ? "已停用" : "未配置计划";
   const knownLibraries = (plan.libraries ?? []).length || plan.libraryCount || 0;
+  const canDelete = !globalPlan && plan.isDefault !== true;
+  const deletePlan = useMutation({
+    mutationFn: () => api.deleteAdminScheduledTaskPlan(plan.id),
+    onSuccess: onDeleted,
+  });
+  const handleDelete = () => {
+    if (!window.confirm(`删除“${name}”后，${knownLibraries} 个媒体库将回到默认计划，并恢复默认 Cron 和启停状态。确定删除吗？`)) {
+      return;
+    }
+    deletePlan.mutate();
+  };
   const beginEditing = () => {
     setSchedule(plan.schedule ?? "");
     setEnabled(plan.isEnabled);
@@ -551,8 +580,9 @@ function ScheduledTaskPlanRow({ plan, libraries, onSaved }: { plan: AdminSchedul
           {update.error ? <p className="lux-error-copy" role="alert">{update.error.message}</p> : null}
         </form> : <span className="lux-registered-task-schedule">{plan.schedule || "尚未配置执行计划"}</span>}
       </div>
-      {!editing ? <div className="lux-registered-task-actions"><button className="lux-button lux-button-compact lux-button-secondary lux-registered-task-run" type="button" aria-label={`立即执行${name}`} onClick={() => runNow.mutate()} disabled={runNow.isPending}><Play size={14} />{runNow.isPending ? "执行中…" : "立即执行"}</button><button className="lux-icon-button lux-icon-button-small lux-registered-task-edit" type="button" aria-label={`编辑${name}`} onClick={beginEditing}><Pencil size={15} /></button></div> : null}
+      {!editing ? <div className="lux-registered-task-actions"><button className="lux-button lux-button-compact lux-button-secondary lux-registered-task-run" type="button" aria-label={`立即执行${name}`} onClick={() => runNow.mutate()} disabled={runNow.isPending || deletePlan.isPending}><Play size={14} />{runNow.isPending ? "执行中…" : "立即执行"}</button><button className="lux-icon-button lux-icon-button-small lux-registered-task-edit" type="button" aria-label={`编辑${name}`} onClick={beginEditing} disabled={deletePlan.isPending}><Pencil size={15} /></button>{canDelete ? <button className="lux-icon-button lux-icon-button-small lux-danger-icon" type="button" aria-label={`删除${name}`} onClick={handleDelete} disabled={deletePlan.isPending} title="删除执行计划"><Trash2 size={15} /></button> : null}</div> : null}
       {runNow.error ? <p className="lux-error-copy lux-registered-task-error" role="alert">{runNow.error.message}</p> : null}
+      {deletePlan.error ? <p className="lux-error-copy lux-registered-task-error" role="alert">{deletePlan.error.message}</p> : null}
     </article>
   );
 }
@@ -591,11 +621,41 @@ function taskGroupLabel(taskType: string) {
   return SCHEDULE_TASK_TYPE_OPTIONS.find(([value]) => value === taskType)?.[1] ?? taskLabel(taskType);
 }
 
+function isEmptyDefaultLibraryPlan(plan: AdminScheduledTaskPlan) {
+  const libraryCount = plan.libraries?.length ?? plan.libraryCount ?? 0;
+  return plan.scopeType === "LIBRARY" && plan.isDefault === true && libraryCount === 0;
+}
+
 function PlanLibraryPicker({ libraries, selectedIds, onChange }: { libraries: AdminLibrary[]; selectedIds: string[]; onChange: (ids: string[]) => void }) {
-  const [search, setSearch] = useState("");
-  const filtered = libraries.filter((library) => library.name.toLowerCase().includes(search.trim().toLowerCase()));
-  const toggle = (libraryId: string) => onChange(selectedIds.includes(libraryId) ? selectedIds.filter((id) => id !== libraryId) : [...selectedIds, libraryId]);
-  return <fieldset className="lux-registered-plan-library-picker"><legend>目标媒体库（已选 {selectedIds.length} 个）</legend><input aria-label="搜索媒体库" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索媒体库" />{filtered.length === 0 ? <p className="lux-admin-muted">没有匹配的媒体库。</p> : <div className="lux-registered-plan-library-options">{filtered.map((library) => <label key={library.id}><input type="checkbox" aria-label={`选择媒体库 ${library.name}`} checked={selectedIds.includes(library.id)} onChange={() => toggle(library.id)} /><span>{library.name}</span></label>)}</div>}</fieldset>;
+  const selectedLibraryIds = new Set(selectedIds);
+  const selectedLibraries = selectedIds
+    .map((libraryId) => libraries.find((library) => library.id === libraryId))
+    .filter((library): library is AdminLibrary => Boolean(library));
+  const availableLibraries = libraries.filter((library) => !selectedLibraryIds.has(library.id));
+  const addLibrary = (libraryId: string) => {
+    if (!selectedLibraryIds.has(libraryId)) onChange([...selectedIds, libraryId]);
+  };
+  const removeLibrary = (libraryId: string) => onChange(selectedIds.filter((id) => id !== libraryId));
+  return <fieldset className="lux-registered-plan-library-picker">
+    <legend>目标媒体库（已选 {selectedIds.length} 个）</legend>
+    <div className="lux-registered-plan-library-field">
+      <div className="lux-registered-plan-library-tags" aria-live="polite">
+        {selectedLibraries.length === 0 ? <span className="lux-registered-plan-library-placeholder">暂未选择媒体库</span> : selectedLibraries.map((library) => <span className="lux-registered-plan-library-tag" key={library.id}>
+          <span>{library.name}</span>
+          <button type="button" aria-label={`移除媒体库 ${library.name}`} onClick={() => removeLibrary(library.id)}><X size={12} aria-hidden="true" /></button>
+        </span>)}
+      </div>
+      <LuxSelect
+        className="lux-registered-plan-library-select"
+        value=""
+        options={availableLibraries.map((library) => ({ value: library.id, label: library.name }))}
+        onChange={addLibrary}
+        placeholder={availableLibraries.length ? "选择媒体库" : "已选全部媒体库"}
+        disabled={availableLibraries.length === 0}
+        aria-label="选择目标媒体库"
+      />
+    </div>
+  </fieldset>;
 }
 
 function RegisteredTasksEmpty() {

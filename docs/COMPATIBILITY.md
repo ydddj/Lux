@@ -14,6 +14,20 @@ Lux 主程序统一走 `ScraperPluginClient`，不再编译 TMDb client/adapter 
 
 本文档是目标客户端兼容性的唯一事实来源。未填入实测版本和证据前，不得宣称兼容。
 
+## LUX-144 TMDb 语言组与详情回退（2026-09-08）
+
+TMDb 语言配置由外置 `Lux-plugins` 的 `org.lux.tmdb` 提供 73 个 canonical 语言组；`zh-CN`/`zh-SG`、
+`zh-TW`/`zh-HK` 以及英语等地区变体不再作为重复选项暴露。宿主和插件都会把旧配置归一化为语言组，默认回退组为
+`zh-TW`，并自动移除与首选组重复的回退项。
+
+详情请求只携带一个首选 `language`，同时 append `translations`；回退开启时插件在本地按精确 locale、同语言组和配置顺序
+逐字段补空，关闭时不读取翻译回退。搜索仍只使用单个首选 locale，图片使用 `include_image_language` 并保留英文/无语言兜底，
+因此不会因为地区变体数量产生并发请求扇出。
+
+验证证据：Lux 主仓库 `cargo test --locked --test plugins`、`plugin_update_tests` 和 Web `plugin-library.test.ts` 通过；
+外置插件的 settings、TMDb client、插件 metadata 单元测试及发布 manifest 测试通过。该记录证明请求/配置行为，不替代 TMDb
+真实账号数据覆盖率或第三方客户端 UI 兼容性实测。
+
 ## Emby 媒体删除兼容合同
 
 Emby 兼容层提供 `DELETE /Items/{itemId}`。拥有服务器管理权限的 Emby token/API key 可删除媒体源；
@@ -289,7 +303,10 @@ TypeScript 检查和生产构建通过；Rust 定向播放测试 1 个通过，R
 本阶段没有新增字幕专用 302/Redia 接口、远程媒体代理、ffmpeg/ffprobe 读取、PGS/SUP 支持或 ArtPlayer 运行时依赖。Rust
 测试和本机 `arm64` 结果不外推为 NAS/x86_64 性能；发布前仍需项目所有者确认后关闭阶段。
 
-## 远程 HTTP(S) `.strm` 播放回归与字幕管线修复（2026-09-07）
+## 远程 HTTP(S) `.strm` 播放回归与字幕管线修复（历史记录，2026-09-07）
+
+本节记录旧部署和旧播放器实现的回归，已由 LUX-245 与 ADR-040 取代。下方“当前”结果只适用于当时的旧 Relay
+合同；当前远程 HTTP(S) `.strm` 必须直接使用 `MediaSources[].externalUrl`，详见下一节。
 
 本次线上检查使用 Chrome 151、macOS arm64 和用户提供的 Lux 站点账号。线上当前部署的旧版播放器在远程
 `.strm` 页面请求了未签名的 `/Videos/.../stream?MediaSourceId=...`，实际响应为 `401`，随后页面显示“播放器引擎失败”。
@@ -308,6 +325,23 @@ TypeScript 检查和生产构建通过；Rust 定向播放测试 1 个通过，R
 本机架构为 `arm64`。真实站点重新部署后，必须复查无字幕请求保持既有 proxy/签名 Direct 顺序；显式字幕只出现同源 `/range` 请求，不出现
 `/subtitles/...` 或并行原生远程媒体连接，
 以及 seek/切换/关闭字幕不重建播放会话。上述结果不外推为 Safari、Firefox 或 NAS/x86_64 性能。
+
+## LUX-245 远程 STRM 浏览器直连与客户端解码 fallback（2026-09-08）
+
+本次验证针对远程 HTTP(S) `.strm` 的 Web 播放边界。自动化夹具只使用合成的 `https://media.example.test/...` 地址，未访问真实
+网盘资源，也没有把凭据、Cookie、完整远程地址或媒体字节写入仓库。宿主机 `uname -m=arm64`；真实远程浏览器 CORS/Range
+smoke test 仍需在部署环境使用一次性测试资源完成。
+
+| 路径/能力 | 结果 | 请求边界与证据 |
+|---|---|---|
+| 远程 HTTP(S) `.strm` 原生播放 | 自动化通过 | `<video>` 的 `src` 使用 `externalUrl`；忽略 `proxyUrl`、`rangeUrl` 和 Lux Direct，媒体错误不会切换到 Lux Relay/HLS |
+| 远程 HEVC/MKV 客户端 fallback | 自动化通过 | `ClientHevcEngine`、`ClientMkvEngine` 输入 `externalUrl`；已有 Worker/WASM/WebCodecs 路径保留，CORS/Range 或 codec 不满足时只报告能力错误 |
+| 远程内嵌 SRT/ASS/SSA | 自动化通过 | `RemoteMkvCaptionReader` 的有限 Range 请求直接发往 `externalUrl`；不请求 Lux `/range` 或 `/subtitles`，字幕失败不停止音视频 |
+| 本地媒体与路径型 `.strm` | 自动化通过 | 相关源继续使用原有 Lux 受保护播放、代理兼容和字幕端点；本次没有改 Rust 播放合同 |
+
+相关 Web 定向回归为 5 个 Vitest 文件、56 个测试通过；完整 `pnpm --dir web test`、生产构建和项目 Rust 质量门结果以本次任务最终命令输出为准。
+尚未完成真实远程资源的浏览器 network smoke，因此不宣称所有上游 CORS/Range 配置、浏览器、codec 或 4K 设备兼容；本机 ARM64
+结果不外推为 NAS/x86_64 性能。
 
 ## Lux Web Chrome 隐私浏览模式 CSRF 兼容性（2026-08-31）
 

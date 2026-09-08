@@ -780,7 +780,6 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .lux-admin-page-heading:not(:has(> .lux-button, > .lux-admin-plugin-heading-actions)) { height: 0; margin-bottom: 0; }
 .lux-admin-page-heading h1 { margin: 10px 0 8px; color: #fff; font-size: clamp(1.75rem, 3vw, 2.6rem); letter-spacing: -.075em; }
 .lux-admin-page-heading p { margin: 0; color: var(--lux-muted); }
-.lux-admin-dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(310px, .95fr); gap: 0; margin-top: 28px; border-bottom: 1px solid var(--lux-line-soft); }
 .lux-admin-panel { min-width: 0; padding: var(--lux-panel-padding); border: 0; border-radius: 0; background: transparent; }
 .lux-admin-panel + .lux-admin-panel { border-left: 1px solid var(--lux-line-soft); }
 .lux-admin-panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 23px; }
@@ -789,20 +788,6 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .lux-status-pill { padding: 6px 10px; border-radius: 999px; font-size: .7rem; }
 .lux-status-pill.is-ok { color: #a5e4bd; background: rgba(96, 194, 132, .13); }
 .lux-status-pill.is-warn { color: #f3c788; background: rgba(226, 163, 75, .13); }
-.lux-admin-check-list { display: grid; gap: 3px; }
-.lux-admin-check { display: grid; grid-template-columns: 24px 1fr auto; align-items: center; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--lux-line-soft); color: rgba(255,255,255,.82); font-size: .84rem; }
-.lux-admin-check small { color: var(--lux-subtle); font-size: .75rem; }
-.lux-check-icon { display: grid; place-items: center; }
-.lux-check-icon.is-ok { color: #9bdcb3; }
-.lux-check-icon.is-warn { color: #f3c788; }
-.lux-admin-meta-row { display: flex; flex-wrap: wrap; gap: 15px; margin-top: 17px; color: var(--lux-subtle); font-size: .72rem; }
-.lux-admin-quick-links { display: grid; gap: 7px; }
-.lux-admin-quick-links a { display: flex; align-items: center; gap: 11px; padding: 12px; border: 1px solid transparent; border-radius: 10px; color: var(--lux-muted); transition: background .2s ease, border-color .2s ease, color .2s ease; }
-.lux-admin-quick-links a:hover { border-color: var(--lux-line-soft); color: #fff; background: rgba(255,255,255,.06); }
-.lux-admin-quick-links a > svg, .lux-quick-icon { flex: 0 0 auto; color: var(--lux-subtle); }
-.lux-admin-quick-links strong, .lux-admin-quick-links small { display: block; }
-.lux-admin-quick-links strong { color: inherit; font-size: .84rem; font-weight: 600; }
-.lux-admin-quick-links small { margin-top: 4px; color: var(--lux-subtle); font-size: .7rem; }
 .lux-admin-page-state { display: grid; place-items: center; align-content: center; min-height: 65vh; color: var(--lux-muted); text-align: center; }
 .lux-admin-page-state h1 { margin: 12px 0 8px; color: #fff; }
 .lux-admin-page-state p { max-width: 48ch; line-height: 1.6; }
@@ -1664,11 +1649,18 @@ html[data-lux-theme="light"] .lux-admin-job-details { background: rgba(28,28,34,
 .lux-registered-plan-editor .lux-registered-plan-library-picker { grid-column: 1 / -1; }
 .lux-registered-plan-library-picker { min-width: 0; margin: 0; padding: 11px; border: 1px solid var(--lux-line-soft); border-radius: 8px; }
 .lux-registered-plan-library-picker legend { padding: 0 5px; color: var(--lux-muted); font-size: .69rem; }
-.lux-registered-plan-library-picker > input { width: 100%; min-height: 36px; padding: 0 var(--lux-control-padding-x); border: 1px solid var(--lux-line-soft); border-radius: 7px; outline: 0; color: var(--lux-text); background: rgba(255,255,255,.04); font-size: .7rem; }
-.lux-registered-plan-library-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; max-height: 170px; margin-top: 9px; overflow-y: auto; }
-.lux-registered-plan-library-options label { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 8px; border: 1px solid transparent; border-radius: 6px; color: var(--lux-muted); background: rgba(255,255,255,.025); font-size: .69rem; }
-.lux-registered-plan-library-options label:has(input:checked) { border-color: color-mix(in srgb, var(--lux-accent) 40%, transparent); color: var(--lux-text); background: color-mix(in srgb, var(--lux-accent) 8%, transparent); }
-.lux-registered-plan-library-options span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lux-registered-plan-library-field { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 45px; padding: 5px 6px 5px 8px; border: 1px solid var(--lux-line-soft); border-radius: 8px; background: rgba(255,255,255,.04); }
+.lux-registered-plan-library-tags { display: flex; flex: 1 1 160px; flex-wrap: wrap; align-items: center; gap: 5px; min-width: 0; }
+.lux-registered-plan-library-placeholder { color: var(--lux-subtle); font-size: .68rem; }
+.lux-registered-plan-library-tag { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 4px 5px 4px 8px; border: 1px solid color-mix(in srgb, var(--lux-accent) 34%, var(--lux-line-soft)); border-radius: 6px; color: var(--lux-text); background: color-mix(in srgb, var(--lux-accent) 13%, transparent); font-size: .68rem; }
+.lux-registered-plan-library-tag > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lux-registered-plan-library-tag button { display: grid; place-items: center; flex: 0 0 auto; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; color: var(--lux-muted); background: transparent; }
+.lux-registered-plan-library-tag button:hover, .lux-registered-plan-library-tag button:focus-visible { color: var(--lux-text); background: rgba(255,255,255,.12); }
+.lux-registered-plan-library-select { flex: 1 1 150px; min-width: 140px; }
+.lux-registered-plan-library-select .lux-select-trigger { min-height: 32px; padding: 0 6px; border-color: transparent; border-radius: 6px; color: var(--lux-muted); background: transparent; box-shadow: none; font-size: .7rem; }
+.lux-registered-plan-library-select .lux-select-trigger:hover:not(:disabled) { border-color: transparent; background: rgba(255,255,255,.07); }
+.lux-registered-plan-library-select .lux-select-trigger[aria-expanded="true"], .lux-registered-plan-library-select .lux-select-trigger:focus-visible { border-color: transparent; box-shadow: 0 0 0 3px color-mix(in srgb, var(--lux-accent) 14%, transparent); }
+.lux-registered-plan-library-select .lux-select-trigger:disabled { color: var(--lux-subtle); opacity: 1; }
 .lux-registered-plan-create { display: grid; gap: 14px; margin-bottom: 18px; padding: 15px; border: 1px solid color-mix(in srgb, var(--lux-accent) 25%, var(--lux-line-soft)); border-radius: 10px; background: color-mix(in srgb, var(--lux-accent) 3%, transparent); }
 .lux-registered-plan-create-grid { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(180px, 1.2fr) minmax(180px, 1fr) auto; align-items: end; gap: 10px 12px; }
 .lux-registered-plan-create-grid > label { display: grid; gap: 6px; color: var(--lux-muted); font-size: .69rem; }
@@ -1796,7 +1788,6 @@ html[data-lux-theme="light"] .lux-admin-job-details { background: rgba(28,28,34,
   .lux-registered-task-row { position: relative; grid-template-columns: 38px minmax(0, 1fr); }
   .lux-registered-task-row:not(.is-editing) .lux-registered-task-heading { padding-right: 148px; }
   .lux-registered-task-actions { position: absolute; top: 17px; right: 15px; }
-  .lux-admin-dashboard-grid { grid-template-columns: 1fr; }
   .lux-admin-server-identity { grid-template-columns: auto minmax(0, 1fr); }
   .lux-admin-server-form { grid-column: 1 / -1; }
 }
@@ -1985,7 +1976,6 @@ html[data-lux-theme="light"] .lux-admin-job-details { background: rgba(28,28,34,
   .lux-registered-plans-search { flex: 1; }
   .lux-registered-plans-search input { width: 100%; min-width: 0; }
   .lux-registered-plan-create-grid { grid-template-columns: 1fr 1fr; }
-  .lux-registered-plan-library-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lux-operations-log-row { grid-template-columns: 45px minmax(0, 1fr) auto; }
   .lux-operations-log-row time { grid-column: 2; grid-row: 2; padding-top: 0; }
   .lux-operations-log-row > .lux-icon-button { grid-column: 3; grid-row: 1 / span 2; }
@@ -2522,13 +2512,6 @@ html[data-lux-theme="light"] .lux-bento-media-subcard { background: rgba(28, 28,
 html[data-lux-theme="light"] .lux-bento-progress-track { background: rgba(28, 28, 34, .1); }
 html[data-lux-theme="light"] .lux-status-pill.is-ok { color: #247b4b; background: rgba(36,123,75,.12); }
 html[data-lux-theme="light"] .lux-status-pill.is-warn { color: #9a5f13; background: rgba(154,95,19,.12); }
-html[data-lux-theme="light"] .lux-admin-check { border-color: var(--lux-line-soft); color: var(--lux-text); }
-html[data-lux-theme="light"] .lux-admin-check small { color: var(--lux-subtle); }
-html[data-lux-theme="light"] .lux-check-icon.is-ok { color: #247b4b; }
-html[data-lux-theme="light"] .lux-check-icon.is-warn { color: #9a5f13; }
-html[data-lux-theme="light"] .lux-admin-quick-links a:hover { border-color: var(--lux-line-soft); color: var(--lux-text); background: rgba(28,28,34,.06); }
-html[data-lux-theme="light"] .lux-admin-quick-links a > svg, html[data-lux-theme="light"] .lux-quick-icon { color: var(--lux-subtle); }
-html[data-lux-theme="light"] .lux-admin-quick-links small { color: var(--lux-subtle); }
 html[data-lux-theme="light"] .lux-admin-page-state h1 { color: var(--lux-text); }
 html[data-lux-theme="light"] .lux-emby-connection-result strong,
 html[data-lux-theme="light"] .lux-emby-job-summary strong,
@@ -2589,8 +2572,10 @@ html[data-lux-theme="light"] .lux-operations-empty { border-color: var(--lux-lin
 html[data-lux-theme="light"] .lux-registered-task-row:hover,
 html[data-lux-theme="light"] .lux-registered-task-row.is-editing { border-color: var(--lux-line); background: rgba(255,255,255,.9); }
 html[data-lux-theme="light"] .lux-registered-plans-search input,
-html[data-lux-theme="light"] .lux-registered-plan-library-picker > input,
+html[data-lux-theme="light"] .lux-registered-plan-library-field,
 html[data-lux-theme="light"] .lux-registered-plan-create-grid input:not([type="checkbox"]) { color: var(--lux-text); background: rgba(28,28,34,.035); }
+html[data-lux-theme="light"] .lux-registered-plan-library-tag button:hover,
+html[data-lux-theme="light"] .lux-registered-plan-library-tag button:focus-visible { background: rgba(28,28,34,.08); }
 html[data-lux-theme="light"] .lux-registered-task-icon { border-color: color-mix(in srgb, var(--lux-accent) 24%, transparent); background: color-mix(in srgb, var(--lux-accent) 8%, transparent); }
 html[data-lux-theme="light"] .lux-registered-task-editor input:not([type="checkbox"]),
 html[data-lux-theme="light"] .lux-operations-log-toolbar input { color: var(--lux-text); background: rgba(28,28,34,.035); }

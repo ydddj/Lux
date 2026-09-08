@@ -163,10 +163,10 @@ Lux 的核心价值不是功能数量，而是：
 - 本地 .nfo 和已有海报、背景图优先。
 - 常规自动处理和“仅补全”不覆盖本地已有标题、简介和图片；“完整刮削”只刷新未锁定的 NFO 字段并替换已有图片。
 - 锁定的 NFO 字段在任何刮削模式下都不覆盖；在线没有返回的图片不删除本地图片。
-- TMDb 插件提供可配置的首选语言，默认使用简体中文 `zh-CN`；可选语言按 `zh-CN`、`zh-SG`、`zh-HK`、`zh-TW`、其他 TMDb 主翻译语言的顺序展示。
-- TMDb 语言回退开关默认关闭；开启后，电影、剧集、季度和单集元数据按管理员选择的语言顺序逐字段补全，默认预选 `zh-SG`、`zh-HK`、`zh-TW`。
+- TMDb 插件提供可配置的首选语言，默认使用简体中文 `zh-CN`；界面按语言组展示，每个语言组只保留一个 canonical locale，简体中文合并 `zh-CN`/`zh-SG`，繁體中文合并 `zh-TW`/`zh-HK`，英语等地区变体同样合并并使用友好名称。
+- TMDb 语言回退开关默认关闭；开启后，电影、剧集、季度和单集详情只请求一次并 append `translations`，再按管理员选择的语言组顺序逐字段补全，默认预选繁體中文 `zh-TW`。图片请求继续使用 `include_image_language`，并保留英文与无语言图片兜底。
 - TMDb 插件提供默认关闭的替代 API 地址开关；开启后可选择默认官方地址 `https://api.themoviedb.org`、`https://api.tmdb.org` 或自定义 HTTP(S) 基础地址。自定义地址不得包含凭据、查询参数或片段，并由插件配置持久化到 `/config/plugin-config/org.lux.tmdb.json`。
-- 图片优先本地；在线图片按 zh-CN、无语言、英文的顺序选择。
+- 图片优先本地；在线图片按首选语言组、无语言、英文的顺序选择。
 - 电影、剧集、季度和单集 NFO 均应兼容常见 Emby/Kodi 旁挂形式。
 - 至少识别 movie.nfo、tvshow.nfo、与视频同名的 .nfo、poster、fanart/backdrop、seasonXX-poster 等常见命名。
 - 写回时使用稳定、公开记录的 Lux NFO 子集，同时尽量保留未知 XML 字段，避免破坏其他软件写入的信息。
@@ -1247,13 +1247,13 @@ locked local value
   > filename/probe fallback
 ~~~
 
-空字符串不应覆盖有效值。TMDb 语言回退按选定语言顺序逐字段补全，而不是整条记录一次性切换语言；回退请求失败时保留首选语言已获得的字段。
+空字符串不应覆盖有效值。TMDb 语言回退按选定语言组顺序逐字段补全，而不是整条记录一次性切换语言；详情使用一次 `append_to_response=translations`，回退开关关闭时忽略翻译载荷，首选语言已获得的字段不会被覆盖。
 
 ### 13.3 刮削器客户端
 
 - TMDb 外置插件的客户端同时兼容 v3 API Key 和历史 v4 Read Access Token。管理员通过 TMDb 插件详情配置自己的 API Key。
 - TMDb 插件自行决定默认凭据、管理员 API Key 和历史 token 的优先级；Lux 不内置、不解析这些凭据，也不在自身 API 或日志中返回它们。
-- TMDb 插件配置包括首选语言、语言回退开关和有序回退语言列表，由宿主保存于 `/config/plugin-config/org.lux.tmdb.json` 并通过 `LUX_PLUGIN_CONFIG_PATH` 传给插件；敏感字段仍不可返回。
+- TMDb 插件配置包括首选语言组、语言回退开关和有序回退语言组列表，由宿主保存于 `/config/plugin-config/org.lux.tmdb.json` 并通过 `LUX_PLUGIN_CONFIG_PATH` 传给外置插件；宿主和插件都会将旧的地区 locale 归一化为 canonical 语言组，敏感字段仍不可返回。
 - 主进程的元数据匹配、候选搜索、图片候选和合集请求统一通过媒体库有序刮削器协议；主进程不得直接访问第三方元数据 API。主刮削器先处理全部请求能力，备用刮削器按能力逐项接管主来源空、无效、不支持或重试失败的项目；补充刮削器只对已确认条目继续补全和合并内容，不重新决定媒体身份。
 - 插件内部使用统一 HTTP client、超时、16 并发配额、每秒 32 次请求限流、重试和 User-Agent。
 - 插件 stdin/stdout RPC 支持有界多路复用；响应按 request ID 分发并允许乱序返回，插件进程故障或超时会结束其全部 pending 请求。
@@ -1352,8 +1352,9 @@ locked local value
   Worker 文本解析器；不写回媒体、不烧录、不生成永久缓存。
 - 远程 HTTP(S) `.strm` 的 Matroska/WebM 默认使用原生 `<video>`，保持字幕功能改动前的 Direct Play 行为。未选择字幕时不启动
   客户端 Matroska Worker、Range、MSE 或字幕专用连接。
-- 用户明确选择远程内嵌 SRT/ASS/SSA 后，才使用当前播放会话签名的同源 `rangeUrl` 进入 `ClientMkvEngine`；Worker 从同一媒体读取器
-  解封装音视频和字幕，音视频输出到 MSE，字幕交给 Lux cue/原生 TextTrack。不会读取外部 CDN URL、预先抽取、落盘或生成外挂文件。
+- 用户明确选择远程内嵌 SRT/ASS/SSA 后，才由浏览器直接对媒体源 `externalUrl` 发起带 CORS 的有限 Range 读取，使用已有的客户端
+  Matroska/WASM 管线解码音视频和字幕；远程音视频 fallback 的 MSE 输出、字幕 cue 和音频均由浏览器完成，Lux 不接收媒体字节。
+  不会预先抽取、落盘或生成外挂文件。上游不支持 CORS/Range、索引或客户端 codec 时只报告能力不足，不回退到 Lux Relay。
 - Range、索引、codec、MSE 或字幕解析失败时，只清除远程字幕并恢复同一播放计划的原生视频，不停止或重建播放会话，不切换服务端 HLS。
 - PGS/SUP 图形字幕不属于本阶段承诺；完整 ASS/SSA 样式、字幕烧录和 HLS 字幕组另行处理。
 
@@ -1367,12 +1368,12 @@ locked local value
 ### 14.6 Web 播放
 
 - Web 播放通过独立的 `/api/v1/playback/sessions` 会话接口创建一次播放计划；Web API 与 Emby 播放接口、DTO 和领域类型分离。
-- 会话计划使用 `tier: 0..4` 和 `plan.kind: DIRECT | SERVER_HLS | UNSUPPORTED` 的判别联合；普通 Direct Play 和 HLS 地址为短期签名 URL，不能要求 `<video>` 或 HLS 请求携带 Lux Cookie；URL 和路径型 `.strm` 的 `DIRECT` 计划都额外返回标准 `/Videos/...` `proxyUrl`，Web 播放器优先使用它并在代理鉴权/映射失败时回退到签名 `url`，该代理地址依赖 Emby token 或代理注入的 API Key。
+- 会话计划使用 `tier: 0..4` 和 `plan.kind: DIRECT | SERVER_HLS | UNSUPPORTED` 的判别联合；普通 Direct Play 和 HLS 地址为短期签名 URL，不能要求 `<video>` 或 HLS 请求携带 Lux Cookie；路径型 `.strm` 的 `DIRECT` 计划继续额外返回标准 `/Videos/...` `proxyUrl`，Web 播放器优先使用它并在代理鉴权/映射失败时回退到签名 `url`。远程 HTTP(S) `.strm` 的 Web 媒体则直接使用 `MediaSources[].externalUrl`，忽略 `proxyUrl`、`rangeUrl` 和 Lux Direct。
 - 档位 0 使用原生 Range 直放或现有客户端 fallback；档位 1～4 使用服务端 fMP4/CMAF HLS。Safari 使用原生 HLS，其他支持 MSE 的浏览器使用 Web HLS 播放器。
 - 创建会话时固定媒体源、音频/字幕选择、起播位置和服务端计划；seek 必要时切换会话生成代次，不把客户端任意路径或外部 URL 交给服务端执行。
 - `.strm` 只能返回档位 0；URL/路径型外部代理接管、URL 型 Lux 直连回退或本地安全读取失败时直接展示错误，不创建 ffmpeg 进程。
-- 内嵌文本字幕是独立于媒体计划的能力：浏览器原生轨道或本地 source-scoped overlay 只能复用当前媒体资源，不能改变 `.strm` 的
-  Direct 规则。远程 HTTP(S) STRM 当前不使用客户端单次读取。
+- 内嵌文本字幕是独立于媒体计划的能力：浏览器原生轨道或客户端 overlay 只能复用当前媒体资源，不能改变 `.strm` 的
+  Direct 规则。远程 HTTP(S) STRM 的客户端读取必须直连 `externalUrl`，不使用 Lux 的 `rangeUrl`。
 - 记录开始、定时进度、暂停、心跳和停止；事件带有幂等 `eventId` 与单调 `sequence`，服务端使用数据库媒体时长计算已看状态。
 - 服务端 HLS 会话必须有界：独立进程组、stderr drain、临时目录配额、Remux/硬件/软件并发限制、心跳超时回收、孤儿目录清理和低磁盘拒绝策略。
 - 不实现 DRM、服务器字幕转换/烧录、多码率自适应 HLS 或 `.strm` 服务端代理。LUX-212 的浏览器文本 cue
@@ -1381,7 +1382,8 @@ locked local value
 - LUX-184 允许提供独立的浏览器媒体能力探针，用于实测原生 video、MediaCapabilities 和 WebCodecs；探针不接入
   正式播放路径，不读取或保存用户媒体数据。
 - LUX-185 可为 MP4/fMP4 的 HEVC 媒体增加浏览器端 WASM 解码、H.264 客户端编码和 MSE 播放 fallback；重型工作
-  必须在 Web Worker 中执行，服务端只继续提供原始媒体 Range 数据。
+  必须在 Web Worker 中执行。本地媒体继续使用 Lux 的受保护 Range；远程 HTTP(S) `.strm` 的原始媒体字节由浏览器
+  直接从 `MediaSources[].externalUrl` 读取，要求上游自行提供 CORS、Range 和稳定资源校验，Lux 不作为媒体代理。
 - 客户端解码增强的目标包括具备相应硬件能力的 4K HEVC 8-bit、10-bit 和 HDR10；Dolby Vision 不属于当前承诺。
 - 若后续新增 WebCodecs 或 WASM 播放引擎，必须单独修改本节、补充 ADR，并通过实际浏览器性能阶段门；不得把
   “浏览器报告支持”直接等同于 4K 实时播放能力。
@@ -2090,6 +2092,7 @@ services:
 | LUX-241 | web/src/features/player/components/player-captions.ts、web/src/features/player/components/player-settings-panel.tsx、web/tests/player-captions.test.ts、web/tests/player-components.test.tsx；字符串字幕 ID 和引擎字幕控制器 |
 | LUX-242 | web/src/features/player/playback-selection.ts、web/src/features/player/PlayerPage.tsx、web/tests/player-playback.test.tsx、web/tests/player-fallback.test.tsx、web/tests/strm-caption-compatibility.test.tsx；远程管线接入和终止错误策略 |
 | LUX-243 | docs/COMPATIBILITY.md、scripts/player-matroska-smoke.mjs、web/tests/；远程 Matroska 客户端管线历史阶段门（当前不实施） |
+| LUX-245 | web/src/features/player/playback-selection.ts、web/src/features/player/PlayerPage.tsx、web/src/features/player/remote-mkv-caption-reader.ts、web/tests/；远程 STRM 浏览器直连与客户端解码 fallback |
 
 ### 阶段 0：仓库和工程纪律
 
@@ -2779,7 +2782,7 @@ services:
 
 验收：
 
-- 一次 Lux API 返回继续观看、可见库入口，以及每个可见媒体库按 `added_at` 从新到旧排列的最新资源横栏数据。
+- 一次 Lux API 返回继续观看、可见库入口，以及每个可见媒体库按有效入库时间从新到旧排列的最新资源横栏数据；电影使用自身 `added_at`，剧集使用自身 `added_at` 与可见可用分集中最新 `added_at` 的较大值，因此已有剧集新增分集后会重新排到前面。
 - Emby Latest/Resume/Views 分别正确。
 - 无 N+1 查询。
 
@@ -3335,19 +3338,20 @@ PostgreSQL 路径改为一条 `LATERAL` 查询，每个媒体库先通过现有 
 
 #### LUX-144：TMDb 多语言首选与回退配置
 
-范围：为 `org.lux.tmdb` 插件增加首选语言、语言回退开关、有序回退语言列表、标题别名替换和替代 API 地址配置。语言选项来自 TMDb 的主翻译语言列表，界面按简体中文、其他中文地区语言、其他语言排序；非敏感配置持久化到 `/config/tmdb_settings.json`。插件对电影、剧集、季度和单集详情按首选语言请求，并在回退开启时按选择顺序逐字段补全；标题别名替换开启且中文首选语言没有中文标题时，使用 TMDb `alternative_titles` 返回的第一个 `CN` 别名；替代 API 地址开启后使用管理员保存的地址。
+范围：为外置 `org.lux.tmdb` 插件增加首选语言组、语言回退开关、有序回退语言组列表、标题别名替换和替代 API 地址配置。语言选项来自 TMDb 的主翻译语言列表并合并地区变体为 73 个 canonical 语言组，非敏感配置由宿主持久化到 `/config/plugin-config/org.lux.tmdb.json`。插件对电影、剧集、季度和单集详情按首选语言发起一次请求并 append `translations`，回退开启时按选择顺序在本地逐字段补全；标题别名替换开启且中文首选语言没有中文标题时，使用 TMDb `alternative_titles` 返回的第一个 `CN` 别名；替代 API 地址开启后使用管理员保存的地址。
 
 验收：
 
-- [ ] TMDb 插件配置返回语言下拉选项；首项为简体中文 `zh-CN`，其次为 `zh-SG`、`zh-HK`、`zh-TW`，之后为 TMDb 主翻译语言；默认首选为 `zh-CN`。
-- [ ] 管理员可以保存语言回退开关和多个有序回退语言；默认预选 `zh-SG`、`zh-HK`、`zh-TW`，配置重启后保持，API 不返回任何凭据。
-- [ ] 回退开启时，电影、剧集、季度、单集元数据只补全空字段，并严格遵循选择顺序；关闭时不发起回退请求。
-- [ ] 标题别名替换默认关闭；开启后电影和剧集在中文首选语言返回非中文标题时尝试使用第一个 `CN` 中文别名，已有中文标题和别名接口失败时保持原值。
-- [ ] 替代 API 地址默认关闭并使用官方地址；开启后可选择 `https://api.tmdb.org` 或自定义 HTTP(S) 地址，插件请求实际经过所选地址。
+- [x] TMDb 插件配置返回 73 个 canonical 语言组；首项为简体中文 `zh-CN`，其次为繁體中文 `zh-TW`、英语 `en-US`；默认首选为 `zh-CN`，旧地区 locale 会自动归一化。
+- [x] 管理员可以保存语言回退开关和多个有序语言组；默认预选繁體中文 `zh-TW`，配置重启后保持，API 不返回任何凭据。
+- [x] 回退开启时，电影、剧集、季度、单集详情只请求一次并从 `translations` 只补全空字段，严格遵循精确 locale、同语言组和选择顺序；关闭时忽略翻译回退。
+- [x] 标题别名替换默认关闭；开启后电影和剧集在中文首选语言返回非中文标题时尝试使用第一个 `CN` 中文别名，已有中文标题和别名接口失败时保持原值。
+- [x] 替代 API 地址默认关闭并使用官方地址；开启后可选择 `https://api.tmdb.org` 或自定义 HTTP(S) 地址，插件请求实际经过所选地址。
 
 验证：
 
-- `cargo test --locked --test plugin_protocol --test plugins --test tmdb_plugin`
+- `cargo test --locked --test plugins`
+- 外置 `Lux-plugins`：`cargo test --locked --lib`、`cargo test --locked --bin lux-plugin-tmdb`、`python3 -m unittest discover -s tests`
 - `pnpm --dir web test`
 - `pnpm --dir web build`
 - `cargo fmt --all -- --check`
@@ -5409,7 +5413,7 @@ source-scoped 字幕端点按需抽取文本字幕；远程 HTTP(S) Matroska 在
 
 依赖：LUX-227。
 
-#### LUX-229：本地/远程 `.strm` 字幕兼容性阶段门（由 ADR-038 收敛）
+#### LUX-229：本地/远程 `.strm` 字幕兼容性阶段门（历史记录，已由 LUX-245 取代）
 
 范围：阶段门使用固定、无个人数据的媒体夹具，分别验证本地媒体、URL 型远程 `.strm`、
 路径型远程 `.strm`、浏览器原生轨道、按需
@@ -5418,8 +5422,9 @@ source-scoped 字幕端点按需抽取文本字幕；远程 HTTP(S) Matroska 在
 验收：
 
 - [ ] 本地内嵌文本字幕可按轨选择并与 Direct/HLS/fallback 生命周期一致；PGS/SUP 明确显示不支持且视频仍可播放。
-- [ ] 远程 URL/path `.strm` 未选择字幕时仍由播放器/外部代理按既有规则直连；仅 URL 型 HTTP(S) Matroska 在明确选择文本轨后通过
-      当前播放会话的有限 Range Relay 读取，不能读取外部 CDN URL、调用 ffmpeg/ffprobe 或创建字幕专用代理。
+- [ ] （历史方案）远程 URL/path `.strm` 未选择字幕时仍由播放器/外部代理按既有规则直连；旧方案仅允许 URL 型 HTTP(S) Matroska
+      在明确选择文本轨后通过当前播放会话的有限 Range Relay 读取。该 Relay 约束已由 LUX-245 的浏览器 `externalUrl` 直连取代，
+      当前实现不能据此验收；仍不允许调用 ffmpeg/ffprobe 或创建服务端媒体代理。
 - [ ] source 切换、seek、停止、页面离开和失败回退不残留字幕；兼容性记录包含浏览器、平台、夹具哈希和请求边界。
 - [ ] 阶段 Rust/Web 全量质量门通过，并记录 `uname -m`；本机 ARM64 结果不外推 NAS/x86_64 性能，项目所有者确认后关闭阶段。
 
@@ -5432,8 +5437,8 @@ source-scoped 字幕端点按需抽取文本字幕；远程 HTTP(S) Matroska 在
 阶段门：
 
 - [ ] 本地文本字幕与浏览器 native track 均不改变播放会话和 `.strm` Direct Play 边界。
-- [ ] 远程 `.strm` 未选择字幕时没有 Lux 媒体字节流量；显式字幕仅允许同源 Range Relay，不增加服务端字幕抽取、ffmpeg 或
-      302/Redia 字幕专用合同。
+- [ ] （历史方案，已取代）远程 `.strm` 未选择字幕时没有 Lux 媒体字节流量；显式字幕仅允许同源 Range Relay。当前验收以 LUX-245
+      为准：显式字幕和客户端解码均由浏览器直连 `externalUrl`，不增加服务端字幕抽取、ffmpeg 或 302/Redia 字幕专用合同。
 - [ ] PGS/SUP、服务器烧录、HLS 字幕组和完整 ASS 样式未被隐式加入，所有未验证浏览器能力均已记录。
 - [ ] Rust/Web 全量质量门、兼容性记录、本机架构记录和项目所有者确认均完成。
 
@@ -5606,12 +5611,16 @@ Lux 内部 UUID、数据库关系和 Lux 原生 `/api/v1` ID 保持不变。所�
 - 不删除 Lux 直接播放 URL 型 `.strm` 的现有 307 回退。
 - 不实现任何第三方代理的路径映射、302 API、缓存、媒体字节代理或转码。
 
-### 阶段 21：远程 STRM 原生默认与显式字幕单管线
+### 阶段 21：远程 STRM 浏览器直连与客户端解码 fallback
 
-阶段 20 的远程 Direct Play 默认行为继续保留：远程 HTTP(S) STRM 始终交给原生 `<video>` 负责音视频。用户明确选择 URL 型
-HTTP(S) Matroska/WebM 的 SRT/ASS/SSA 后，才通过播放会话签名 `rangeUrl` 启动字幕旁路读取器，由 JavaScript 解封装 Cue-selected
-Cluster 并交给覆盖层；不切换到 `ClientMkvEngine`，不接管音频/视频。字幕旁路失败只清除字幕状态；不停止或重建播放会话。
-详细决定记录在 ADR-039。
+远程 HTTP(S) STRM 的 Web Direct Play 直接使用 `externalUrl`，不使用 Lux 的 `proxyUrl`、`rangeUrl` 或签名 Direct URL。原生 `<video>`
+仍是第一路径；浏览器原生能力不足时，才由客户端 WASM/WebCodecs 管线从同一 `externalUrl` 读取。用户明确选择 URL 型
+HTTP(S) Matroska/WebM 的 SRT/ASS/SSA 后，字幕旁路读取器也直接读取 `externalUrl`；所有远程媒体字节都不经过 Lux。
+直连、CORS/Range、WASM/WebCodecs 或解析失败只显示能力错误，不切换到 Lux Relay/HLS。详细决定记录在 ADR-040，ADR-039
+保留为已取代的 Relay 方案历史记录。
+
+> 说明：下列 LUX-235 至 LUX-243 保留为此前的远程字幕 Relay 方案记录；其未完成的验收条件不再是当前实现目标，远程媒体边界以
+> LUX-245 和 ADR-040 为准。
 
 #### LUX-235：远程 Matroska 客户端管线规格与 ADR-035
 
@@ -5743,11 +5752,31 @@ cue 和 Worker。
 验收：
 
 - [ ] Chrome、Firefox、Safari 分别只记录真实可播放的 codec 组合，不把 `isTypeSupported` 单独当作成功。
-- [ ] 确认无字幕端点请求、无第二条原生媒体连接、无服务端抽取/ffmpeg/通用媒体代理流量；显式字幕只使用同源 Range Relay。
+- [ ] （历史方案，已由 LUX-245 取代）确认无字幕端点请求、无第二条原生媒体连接、无服务端抽取/ffmpeg/通用媒体代理流量；旧方案显式字幕只使用同源 Range Relay。
 - [ ] `pnpm --dir web install --frozen-lockfile`、Web 全量测试/构建、Rust 全量质量门、`uname -m` 均通过；ARM64 结果不外推 NAS/x86。
 - [ ] 项目所有者确认阶段门后才关闭本阶段。
 
 依赖：LUX-242。
+
+#### LUX-245：远程 STRM 浏览器直连与客户端解码 fallback
+
+范围：修正 Lux Web 对远程 HTTP(S) `.strm` 的媒体边界。原生播放、客户端 Matroska/HEVC WASM fallback 和远程字幕读取器
+均直接使用媒体源的 `externalUrl`；Lux 只创建/维护播放会话、记录进度并提供权限控制，不接收远程视频、音频或字幕媒体字节。
+本地媒体和路径型 `.strm` 的现有 Lux 受保护播放/代理兼容行为保持不变。
+
+验收：
+
+- [ ] 远程 HTTP(S) `.strm` 的原生 `<video>`、`ClientMkvEngine`、`ClientHevcEngine` 和 `RemoteMkvCaptionReader` 输入均为
+  原始 `externalUrl`；Web 不使用远程 `proxyUrl`、`rangeUrl`、Lux Direct、Lux HLS 或服务端 ffmpeg 传输媒体字节。
+- [ ] 浏览器原生能力不足时，远程 MP4/fMP4 HEVC 和 Matroska fallback 可在上游支持 CORS/Range 时使用现有 WASM/WebCodecs
+  Worker；不支持时给出可诊断失败，且不自动回退到 Lux Relay。
+- [ ] 远程字幕旁路使用浏览器到 `externalUrl` 的有限 CORS/Range 请求；旁路失败只清除字幕，不停止/重建会话，不影响原生音视频。
+- [ ] 路径型 `.strm`、本地媒体、Emby 兼容层、播放会话/进度接口和媒体字节不相关的 Lux 控制请求不回归。
+
+验证：相关 Web 单测、`pnpm --dir web test`、`pnpm --dir web build`、远程 CORS/Range 浏览器 smoke test、`git diff --check`；
+记录 `uname -m`，本机 ARM64 结果不外推 NAS/x86 性能。
+
+依赖：LUX-185、LUX-198、LUX-234。
 
 #### LUX-244：任务类型与执行计划聚合
 
@@ -5761,14 +5790,68 @@ cue 和 Worker。
 - [x] 新增 `scheduled_task_plans` 和 `scheduled_task_plan_libraries`，`scheduled_task_configs.plan_id` 保存旧配置镜像关系。
 - [x] 旧数据库迁移后，原有不同 Cron、启停状态、插件来源和资源限制保持不变；相同有效配置按任务类型自动分组。
 - [x] 新建媒体库加入匹配的默认执行计划；自定义计划可以原子移动多个媒体库，服务端拒绝同一任务类型的重复归属。
-- [x] 计划 API 支持分页列表、创建、更新、媒体库范围更新和立即执行；旧 `/admin/scheduled-tasks` API 保持兼容。
+- [x] 计划 API 支持分页列表、创建、更新、媒体库范围更新、删除和立即执行；删除自定义计划时媒体库回到匹配默认计划；默认及全局插件计划不可删除；旧 `/admin/scheduled-tasks` API 保持兼容。
 - [x] 调度按计划触发、按媒体库运行；实时增量扫描优先，全量扫描默认串行，活动任务不重复排队。
-- [x] Web 任务页按任务类型展示多个执行计划，支持搜索、多选媒体库、独立 Cron 和计划级立即执行。
+- [x] Web 任务页按任务类型展示多个执行计划，支持搜索、多选媒体库、独立 Cron、计划级立即执行和自定义计划删除。
 - [x] SQLite 空库/已有库迁移、Rust API/调度测试、Web 测试、格式、Clippy 和构建通过；记录 `uname -m`。
 
 验证：参见 `docs/LUX-244-PLAN.md`。
 
 依赖：LUX-105、LUX-154、LUX-189。
+
+#### LUX-246：跨数据库扫描写入与索引维护优化
+
+针对扫描期间 PostgreSQL 的写入、WAL 和索引维护压力，在不改变 Lux 现有扫描并发配置的前提下，优化扫描中间数据的批量写入、删除和重复状态写入，
+并清理已经确认不被查询或唯一约束需要的冗余索引。所有改动必须同时适用于 SQLite 和 PostgreSQL，继续使用统一的 storage 抽象，
+不得引入 PostgreSQL 专属 SQL 或把整个媒体库放入单个长事务。
+
+本任务明确不调整 `LUX_SCAN_CONCURRENCY`、媒体库 `scanConcurrency`、数据库连接池上限或其他并发档位；并发控制仍由现有配置和资源调度逻辑负责。
+
+验收：
+
+- [ ] SQLite/PostgreSQL 迁移均删除经过查询与约束核对的冗余索引；空库初始化和已有数据库升级均可完成，不能误删唯一约束或仍被查询使用的索引。
+- [ ] `scan_job_targets`、`reconciliation_scan_entries` 等扫描中间数据的批量 DML 使用有界且跨数据库安全的批次，SQLite 不超过参数限制，PostgreSQL 不产生不必要的大事务；扫描语义、取消、重试和幂等行为保持不变。
+- [ ] 扫描状态和中间数据在值未变化时不重复执行可避免的写入、删除或索引维护；失败恢复仍能保留需要重试的数据。
+- [ ] 增加覆盖迁移、批量边界、SQLite 参数安全和 PostgreSQL 兼容性的测试，并以代表性扫描数据记录优化前后的写入/WAL 或查询执行证据；不以单机 ARM64 结果外推 NAS/x86_64 性能。
+- [ ] 不修改扫描并发环境变量语义，不改变 Lux API、数据库公共模型或 SQLite/PostgreSQL 的数据一致性语义。
+
+验证：
+
+- `cargo test --locked --test storage --test scanner --test scanning_jobs`
+- `cargo test --locked --test postgres_database`（需要可用 PostgreSQL 测试环境）
+- `cargo fmt --all -- --check`
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- `uname -m`，并记录本机 ARM64 结果不外推 NAS/x86_64 性能。
+
+依赖：LUX-232、LUX-244。
+
+明确不做：
+
+- 不降低或重写 `LUX_SCAN_CONCURRENCY`、媒体库 `scanConcurrency` 或数据库连接并发配置。
+- 不执行 `VACUUM FULL`、在线重建全库索引或其他长时间独占数据库的操作。
+- 不连接或直接修改用户线上 FNOS 数据库；优化通过 Lux 迁移和 storage 实现交付。
+
+实现文件：`migrations/0117_redundant_child_indexes.sql`、`migrations-postgres/0117_redundant_child_indexes.sql`、
+`migrations/0118_scan_index_compaction.sql`、`migrations-postgres/0118_scan_index_compaction.sql`、
+`src/storage/jobs.rs`、`src/storage/repository.rs`、`src/storage/repository_tests.rs`、`tests/storage.rs`、
+`tests/postgres_database.rs`、`tests/admin_health.rs`、`tests/danmaku.rs`、`tests/ready_version.rs` 和
+`tests/scanner.rs`；性能记录见 `docs/PERFORMANCE.md`。
+
+验证记录（2026-09-08，`uname -m=arm64`）：`cargo build --locked`、
+`cargo test --locked --all-targets`（库测试 429 passed、4 ignored，所有集成目标通过）、
+`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets --all-features -- -D warnings` 和
+`git diff --check` 均通过。扫描发现批量 DML 的 SQLite 回归基准由 1,025 条路径对应 11 条降至 6 条，
+约减少 45.5%；该结果只代表本机 ARM64/SQLite，不外推 PostgreSQL WAL 或 NAS/x86_64。
+PostgreSQL 集成测试目标已编译，但其 4 个运行测试因本机没有可用 PostgreSQL 实例而保持 ignored，
+因此真实 PostgreSQL 迁移/WAL 证据仍待可用测试环境复测。
+
+补充记录（2026-09-08）：0118 迁移将 `reconciliation_scan_entries` 的主键列顺序调整为
+`(job_id, entry_type, library_root_id, relative_path)`，删除与新主键重复的宽索引；将
+`scan_job_targets` 的三个阶段索引限制为 `PENDING/FAILED`，并删除未发现独立查询路径的
+`media_streams.external_path` 索引。`item_images`、`person_credits` 的冗余索引已由 0117
+处理；`media_items` 未发现可安全删除的明确冗余索引，因此保持不变。新增测试会先运行 1–117
+迁移、写入代表性旧数据，再单独运行 118，确认扫描条目、扫描目标和外键约束均被保留。
+该验证覆盖 SQLite 的真实升级路径；PostgreSQL 仍需在可用实例上运行被忽略的集成测试。
 
 ## 26. 风险与缓解
 

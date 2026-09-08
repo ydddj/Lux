@@ -16,7 +16,10 @@ const SIDECAR_DIRECTORY_TARGET_QUERY: &str = "INSERT INTO scan_job_targets (
      ON CONFLICT(job_id, target_type, target_id) DO UPDATE SET
          change_kind = 'SIDECAR', metadata_state = 'PENDING', error = NULL,
          updated_at = unixepoch()
-     WHERE scan_job_targets.change_kind <> 'REMOVED'";
+     WHERE scan_job_targets.change_kind <> 'REMOVED'
+       AND (scan_job_targets.change_kind <> 'SIDECAR'
+            OR scan_job_targets.metadata_state <> 'PENDING'
+            OR scan_job_targets.error IS NOT NULL)";
 
 fn prune_sidecar_directories(mut directories: Vec<String>) -> Vec<String> {
     directories.sort();
@@ -945,7 +948,7 @@ impl Database {
         media_files: &[String],
     ) -> Result<(), StorageError> {
         for (entry_type, paths) in [("DIRECTORY", child_directories), ("FILE", media_files)] {
-            for chunk in paths.chunks(BATCH_INSERT_CHUNK_SIZE) {
+            for chunk in paths.chunks(SCAN_DML_CHUNK_SIZE) {
                 if chunk.is_empty() {
                     continue;
                 }
@@ -956,7 +959,7 @@ impl Database {
                     "INSERT INTO reconciliation_scan_entries (
                          job_id, library_root_id, relative_path, entry_type
                      ) VALUES {values}
-                     ON CONFLICT(job_id, library_root_id, entry_type, relative_path) DO NOTHING"
+                     ON CONFLICT(job_id, entry_type, library_root_id, relative_path) DO NOTHING"
                 );
                 let mut statement = self.query(sqlx::AssertSqlSafe(query));
                 for path in chunk {
@@ -1068,7 +1071,7 @@ impl Database {
                 .push(entry.relative_path.as_str());
         }
         for (library_root_id, paths) in entries_by_root {
-            for chunk in paths.chunks(BATCH_INSERT_CHUNK_SIZE) {
+            for chunk in paths.chunks(SCAN_DML_CHUNK_SIZE) {
                 let placeholders = std::iter::repeat_n("?", chunk.len())
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -1190,7 +1193,7 @@ impl Database {
         if relative_paths.is_empty() {
             return Ok(());
         }
-        for paths in relative_paths.chunks(BATCH_INSERT_CHUNK_SIZE) {
+        for paths in relative_paths.chunks(SCAN_DML_CHUNK_SIZE) {
             let placeholders = std::iter::repeat_n("?", paths.len())
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -1303,7 +1306,10 @@ impl Database {
                  ON CONFLICT(job_id, target_type, target_id) DO UPDATE SET
                      change_kind = 'SIDECAR', metadata_state = 'PENDING', error = NULL,
                      updated_at = unixepoch()
-                 WHERE scan_job_targets.change_kind <> 'REMOVED'",
+                 WHERE scan_job_targets.change_kind <> 'REMOVED'
+                   AND (scan_job_targets.change_kind <> 'SIDECAR'
+                        OR scan_job_targets.metadata_state <> 'PENDING'
+                        OR scan_job_targets.error IS NOT NULL)",
             )
             .bind(job_id)
             .bind(library_root_id)
@@ -1352,7 +1358,7 @@ impl Database {
         if relative_paths.is_empty() {
             return Ok(());
         }
-        for paths in relative_paths.chunks(BATCH_INSERT_CHUNK_SIZE) {
+        for paths in relative_paths.chunks(SCAN_DML_CHUNK_SIZE) {
             let placeholders = std::iter::repeat_n("?", paths.len())
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -1613,7 +1619,7 @@ impl Database {
         item_ids: &[String],
     ) -> Result<HashSet<String>, StorageError> {
         let mut pending = HashSet::new();
-        for chunk in item_ids.chunks(BATCH_INSERT_CHUNK_SIZE) {
+        for chunk in item_ids.chunks(SCAN_DML_CHUNK_SIZE) {
             if chunk.is_empty() {
                 continue;
             }
@@ -1670,14 +1676,15 @@ impl Database {
                 ));
             }
         };
-        for chunk in target_ids.chunks(BATCH_INSERT_CHUNK_SIZE) {
+        for chunk in target_ids.chunks(SCAN_DML_CHUNK_SIZE) {
             let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(", ");
             let query = format!(
                 "UPDATE scan_job_targets
                  SET {column} = ?, updated_at = unixepoch()
-                 WHERE job_id = ? AND target_type = ? AND target_id IN ({placeholders})"
+                 WHERE job_id = ? AND target_type = ? AND target_id IN ({placeholders})
+                   AND {column} <> ?"
             );
             let mut statement = self
                 .query(sqlx::AssertSqlSafe(query))
@@ -1687,6 +1694,7 @@ impl Database {
             for target_id in chunk {
                 statement = statement.bind(target_id);
             }
+            statement = statement.bind(state);
             statement
                 .execute(&self.pool)
                 .await
@@ -1779,7 +1787,10 @@ impl Database {
                  metadata_state = CASE WHEN metadata_state = 'FAILED' THEN 'PENDING' ELSE metadata_state END,
                  thumbnail_state = CASE WHEN thumbnail_state = 'FAILED' THEN 'PENDING' ELSE thumbnail_state END,
                  updated_at = unixepoch()
-             WHERE job_id = ?",
+             WHERE job_id = ?
+               AND (probe_state = 'FAILED'
+                    OR metadata_state = 'FAILED'
+                    OR thumbnail_state = 'FAILED')",
         )
         .bind(job_id)
         .execute(&self.pool)
@@ -2344,6 +2355,178 @@ impl Database {
             path: self.path.clone(),
             source,
         })
+    }
+
+    pub(crate) async fn list_current_metadata_reidentify_items(
+        &self,
+        job_ids: &[String],
+    ) -> Result<Vec<(String, StoredJobActivityItem)>, StorageError> {
+        if job_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", job_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "WITH ranked AS (
+                 SELECT job_items.job_id, items.item_type, items.season_number,
+                        items.episode_number, items.title, series.title AS series_title,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY job_items.job_id
+                            ORDER BY CASE WHEN job_items.status = 'RUNNING' THEN 0 ELSE 1 END,
+                                     job_items.updated_at DESC, job_items.item_id
+                        ) AS activity_rank
+                 FROM metadata_reidentify_job_items job_items
+                 JOIN media_items items ON items.id = job_items.item_id
+                 LEFT JOIN media_items series ON series.id = items.series_id
+                 WHERE job_items.job_id IN ({placeholders})
+                   AND job_items.status IN ('PENDING', 'RUNNING')
+             )
+             SELECT job_id, item_type, season_number, episode_number, title, series_title
+             FROM ranked WHERE activity_rank = 1"
+        );
+        let mut statement = self.query(sqlx::AssertSqlSafe(query));
+        for job_id in job_ids {
+            statement = statement.bind(job_id);
+        }
+        statement
+            .fetch_all(&self.pool)
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| {
+                        (
+                            row.get("job_id"),
+                            StoredJobActivityItem {
+                                item_type: row.get("item_type"),
+                                season_number: row.get("season_number"),
+                                episode_number: row.get("episode_number"),
+                                title: row.get("title"),
+                                series_title: row.get("series_title"),
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .map_err(|source| StorageError::Sqlx {
+                path: self.path.clone(),
+                source,
+            })
+    }
+
+    pub(crate) async fn list_current_chapter_detection_items(
+        &self,
+        job_ids: &[String],
+    ) -> Result<Vec<(String, StoredJobActivityItem)>, StorageError> {
+        if job_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", job_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "WITH ranked AS (
+                 SELECT job_items.job_id, items.item_type, items.season_number,
+                        items.episode_number, items.title, series.title AS series_title,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY job_items.job_id
+                            ORDER BY CASE WHEN job_items.status = 'RUNNING' THEN 0 ELSE 1 END,
+                                     job_items.updated_at DESC, job_items.source_id
+                        ) AS activity_rank
+                 FROM chapter_detection_job_items job_items
+                 JOIN media_items items ON items.id = job_items.item_id
+                 LEFT JOIN media_items series ON series.id = items.series_id
+                 WHERE job_items.job_id IN ({placeholders})
+                   AND job_items.status IN ('PENDING', 'RUNNING')
+             )
+             SELECT job_id, item_type, season_number, episode_number, title, series_title
+             FROM ranked WHERE activity_rank = 1"
+        );
+        let mut statement = self.query(sqlx::AssertSqlSafe(query));
+        for job_id in job_ids {
+            statement = statement.bind(job_id);
+        }
+        statement
+            .fetch_all(&self.pool)
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| {
+                        (
+                            row.get("job_id"),
+                            StoredJobActivityItem {
+                                item_type: row.get("item_type"),
+                                season_number: row.get("season_number"),
+                                episode_number: row.get("episode_number"),
+                                title: row.get("title"),
+                                series_title: row.get("series_title"),
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .map_err(|source| StorageError::Sqlx {
+                path: self.path.clone(),
+                source,
+            })
+    }
+
+    pub(crate) async fn list_current_danmaku_match_items(
+        &self,
+        job_ids: &[String],
+    ) -> Result<Vec<(String, StoredJobActivityItem)>, StorageError> {
+        if job_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", job_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "WITH ranked AS (
+                 SELECT job_items.job_id, items.item_type, items.season_number,
+                        items.episode_number, items.title, series.title AS series_title,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY job_items.job_id
+                            ORDER BY CASE WHEN job_items.status = 'RUNNING' THEN 0 ELSE 1 END,
+                                     job_items.updated_at DESC, job_items.id
+                        ) AS activity_rank
+                 FROM danmaku_match_job_items job_items
+                 JOIN media_sources sources ON sources.id = job_items.media_source_id
+                 JOIN media_items items ON items.id = sources.item_id
+                 LEFT JOIN media_items series ON series.id = items.series_id
+                 WHERE job_items.job_id IN ({placeholders})
+                   AND job_items.status IN ('PENDING', 'RUNNING')
+             )
+             SELECT job_id, item_type, season_number, episode_number, title, series_title
+             FROM ranked WHERE activity_rank = 1"
+        );
+        let mut statement = self.query(sqlx::AssertSqlSafe(query));
+        for job_id in job_ids {
+            statement = statement.bind(job_id);
+        }
+        statement
+            .fetch_all(&self.pool)
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| {
+                        (
+                            row.get("job_id"),
+                            StoredJobActivityItem {
+                                item_type: row.get("item_type"),
+                                season_number: row.get("season_number"),
+                                episode_number: row.get("episode_number"),
+                                title: row.get("title"),
+                                series_title: row.get("series_title"),
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .map_err(|source| StorageError::Sqlx {
+                path: self.path.clone(),
+                source,
+            })
     }
 
     pub(crate) async fn active_library_metadata_reidentify_job_id(

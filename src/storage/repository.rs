@@ -65,6 +65,8 @@ pub(crate) const MAX_PLAYBACK_SESSION_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
 pub(crate) const DEFAULT_PLAYED_PERCENT: i64 = 95;
 const MAX_BACKGROUND_PAGE_SIZE: i64 = 500;
 const BATCH_INSERT_CHUNK_SIZE: usize = 100;
+// Four binds per reconciliation row keep 200 rows below SQLite's historical 999-variable limit.
+const SCAN_DML_CHUNK_SIZE: usize = 200;
 const RECOMMENDATION_RATING_CACHE_TTL_SECONDS: i64 = 30 * 86_400;
 const DATABASE_POOL_MAX_CONNECTIONS_ENV: &str = "LUX_DB_MAX_CONNECTIONS";
 const SQLITE_DATABASE_POOL_MAX_CONNECTIONS: u32 = 8;
@@ -1537,6 +1539,15 @@ pub(crate) struct StoredMetadataReidentifyItem {
     pub(crate) candidate_count: i64,
     pub(crate) error: Option<String>,
     pub(crate) updated_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct StoredJobActivityItem {
+    pub(crate) item_type: String,
+    pub(crate) season_number: Option<i64>,
+    pub(crate) episode_number: Option<i64>,
+    pub(crate) title: String,
+    pub(crate) series_title: Option<String>,
 }
 
 fn stored_metadata_reidentify_job(row: sqlx::any::AnyRow) -> StoredMetadataReidentifyJob {

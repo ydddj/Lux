@@ -99,7 +99,55 @@ describe("AdminOperationsPage", () => {
     });
   });
 
-  it("edits a plan cron and moves selected libraries with a searchable picker", async () => {
+  it("does not show an empty default library plan as a duplicate executable task", async () => {
+    vi.spyOn(api, "adminScheduledTasks").mockResolvedValue({ scheduledTasks: [], total: 0 });
+    vi.spyOn(api, "adminScheduledTaskPlans").mockResolvedValue({
+      plans: [
+        {
+          id: "plan-default",
+          taskType: "RECONCILIATION_SCAN",
+          name: "全量校验媒体库",
+          schedule: "0 3 * * 0",
+          isEnabled: true,
+          sourceType: "SYSTEM",
+          scopeType: "LIBRARY",
+          isDefault: true,
+          libraries: [],
+          libraryCount: 0,
+        },
+        {
+          id: "plan-weekly",
+          taskType: "RECONCILIATION_SCAN",
+          name: "周日校验",
+          schedule: "0 3 * * 0",
+          isEnabled: true,
+          sourceType: "SYSTEM",
+          scopeType: "LIBRARY",
+          isDefault: false,
+          libraries: [{ id: "library-1", name: "电影库" }],
+          libraryCount: 1,
+        },
+      ],
+      total: 2,
+      page: 1,
+      pageSize: 50,
+    });
+    vi.spyOn(api, "adminJobs").mockResolvedValue({ jobs: [] });
+    vi.spyOn(api, "adminMetadataReidentifyJobs").mockResolvedValue({ jobs: [] });
+    vi.spyOn(api, "adminLogs").mockResolvedValue({ events: [] });
+    renderPage();
+
+    await act(async () => {
+      await vi.waitFor(() => expect(container.textContent).toContain("周日校验"));
+    });
+
+    expect(container.querySelectorAll(".lux-registered-plan-row")).toHaveLength(1);
+    expect(container.textContent).not.toContain("0 个媒体库");
+    expect(container.textContent).toContain("1 个执行计划");
+    expect(container.querySelector(".lux-operations-summary .lux-operations-stat strong")?.textContent).toBe("1");
+  });
+
+  it("edits a plan cron with a tag-style dropdown that hides selected libraries", async () => {
     vi.spyOn(api, "adminScheduledTasks").mockResolvedValue({ scheduledTasks: [], total: 0 });
     vi.spyOn(api, "adminScheduledTaskPlans").mockResolvedValue({
       plans: [{
@@ -133,26 +181,166 @@ describe("AdminOperationsPage", () => {
       await vi.waitFor(() => expect(container.textContent).toContain("夜间校验"));
     });
     act(() => container.querySelector<HTMLButtonElement>('button[aria-label="编辑夜间校验"]')?.click());
-    const librarySearch = container.querySelector<HTMLInputElement>('input[aria-label="搜索媒体库"]');
-    expect(librarySearch).not.toBeNull();
-    act(() => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(librarySearch, "剧集");
-      librarySearch?.dispatchEvent(new Event("input", { bubbles: true }));
-      librarySearch?.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    const secondLibrary = container.querySelector<HTMLInputElement>('input[aria-label="选择媒体库 剧集库"]');
+    expect(container.querySelector('input[aria-label="搜索媒体库"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="移除媒体库 电影库"]')).not.toBeNull();
+
+    const librarySelect = container.querySelector<HTMLButtonElement>('button[role="combobox"][aria-label="选择目标媒体库"]');
+    expect(librarySelect).not.toBeNull();
+    await act(async () => librarySelect?.click());
+    expect(document.querySelector('[role="option"][data-value="library-1"]')).toBeNull();
+    const secondLibrary = document.querySelector<HTMLButtonElement>('[role="option"][data-value="library-2"]');
     expect(secondLibrary).not.toBeNull();
-    act(() => secondLibrary?.click());
-    expect(secondLibrary?.checked).toBe(true);
+    await act(async () => secondLibrary?.click());
+    expect(container.querySelector('button[aria-label="移除媒体库 剧集库"]')).not.toBeNull();
+
+    await act(async () => librarySelect?.click());
+    expect(document.querySelector('[role="option"][data-value="library-2"]')).toBeNull();
+    const removeFirstLibrary = container.querySelector<HTMLButtonElement>('button[aria-label="移除媒体库 电影库"]');
+    expect(removeFirstLibrary).not.toBeNull();
+    act(() => removeFirstLibrary?.click());
+    expect(container.querySelector('button[aria-label="移除媒体库 电影库"]')).toBeNull();
     await act(async () => {
       container.querySelector<HTMLButtonElement>(".lux-registered-plan-editor button[type='submit']")?.click();
       await vi.waitFor(() => expect(updatePlan).toHaveBeenCalledWith("plan-night", {
         name: "夜间校验",
         schedule: "0 2 * * *",
         isEnabled: true,
-        libraryIds: ["library-1", "library-2"],
+        libraryIds: ["library-2"],
       }));
     });
+  });
+
+  it("allows deleting custom plans after confirmation while protecting default and global plans", async () => {
+    vi.spyOn(api, "adminScheduledTasks").mockResolvedValue({ scheduledTasks: [], total: 0 });
+    vi.spyOn(api, "adminScheduledTaskPlans").mockResolvedValue({
+      plans: [
+        {
+          id: "plan-custom",
+          taskType: "RECONCILIATION_SCAN",
+          name: "夜间校验",
+          schedule: "0 2 * * *",
+          isEnabled: true,
+          scopeType: "LIBRARY",
+          isDefault: false,
+          libraries: [{ id: "library-1", name: "电影库" }],
+          libraryCount: 1,
+        },
+        {
+          id: "plan-default",
+          taskType: "RECONCILIATION_SCAN",
+          name: "默认校验",
+          schedule: "0 3 * * 0",
+          isEnabled: true,
+          scopeType: "LIBRARY",
+          isDefault: true,
+          libraries: [{ id: "library-2", name: "剧集库" }],
+          libraryCount: 1,
+        },
+        {
+          id: "plan-global",
+          taskType: "STRM_MEDIA_INFO",
+          name: "STRM 信息",
+          schedule: "0 4 * * *",
+          isEnabled: true,
+          scopeType: "GLOBAL",
+          isDefault: true,
+          libraries: [],
+          libraryCount: 0,
+        },
+      ],
+      total: 3,
+      page: 1,
+      pageSize: 50,
+    });
+    const deletePlan = vi.spyOn(api, "deleteAdminScheduledTaskPlan").mockResolvedValue(undefined);
+    const confirmDelete = vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(api, "adminJobs").mockResolvedValue({ jobs: [] });
+    vi.spyOn(api, "adminMetadataReidentifyJobs").mockResolvedValue({ jobs: [] });
+    vi.spyOn(api, "adminLogs").mockResolvedValue({ events: [] });
+    renderPage();
+
+    await act(async () => {
+      await vi.waitFor(() => expect(container.textContent).toContain("夜间校验"));
+    });
+    expect(container.querySelector('button[aria-label="删除夜间校验"]')).not.toBeNull();
+    expect(container.querySelector('button[aria-label="删除默认校验"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="删除STRM 信息"]')).toBeNull();
+
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="删除夜间校验"]')?.click());
+    await act(async () => {
+      await vi.waitFor(() => expect(deletePlan).toHaveBeenCalledWith("plan-custom"));
+    });
+    expect(confirmDelete).toHaveBeenCalledWith(expect.stringContaining("媒体库将回到默认计划"));
+  });
+
+  it("returns to the previous available plan page after deleting its last item", async () => {
+    vi.spyOn(api, "adminScheduledTasks").mockResolvedValue({ scheduledTasks: [], total: 0 });
+    let deleted = false;
+    vi.spyOn(api, "adminScheduledTaskPlans").mockImplementation(async (page = 1) => {
+      if (page === 2) {
+        return deleted ? {
+          plans: [],
+          total: 50,
+          page: 2,
+          pageSize: 50,
+        } : {
+          plans: [{
+            id: "plan-last",
+            taskType: "RECONCILIATION_SCAN",
+            name: "最后一个计划",
+            schedule: "0 4 * * *",
+            isEnabled: true,
+            scopeType: "LIBRARY",
+            isDefault: false,
+            libraries: [{ id: "library-1", name: "电影库" }],
+            libraryCount: 1,
+          }],
+          total: 51,
+          page: 2,
+          pageSize: 50,
+        };
+      }
+      return {
+        plans: [{
+          id: "plan-first",
+          taskType: "RECONCILIATION_SCAN",
+          name: "第一页计划",
+          schedule: "0 3 * * *",
+          isEnabled: true,
+          scopeType: "LIBRARY",
+          isDefault: false,
+          libraries: [{ id: "library-1", name: "电影库" }],
+          libraryCount: 1,
+        }],
+        total: deleted ? 50 : 51,
+        page: 1,
+        pageSize: 50,
+      };
+    });
+    vi.spyOn(api, "deleteAdminScheduledTaskPlan").mockImplementation(async () => {
+      deleted = true;
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.spyOn(api, "adminJobs").mockResolvedValue({ jobs: [] });
+    vi.spyOn(api, "adminMetadataReidentifyJobs").mockResolvedValue({ jobs: [] });
+    vi.spyOn(api, "adminLogs").mockResolvedValue({ events: [] });
+    renderPage();
+
+    await act(async () => {
+      await vi.waitFor(() => expect(container.textContent).toContain("第一页计划"));
+    });
+    const nextPage = container.querySelectorAll<HTMLButtonElement>(".lux-admin-pagination button")[1];
+    act(() => nextPage?.click());
+    await act(async () => {
+      await vi.waitFor(() => expect(container.textContent).toContain("最后一个计划"));
+    });
+
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="删除最后一个计划"]')?.click());
+    await act(async () => {
+      await vi.waitFor(() => expect(container.textContent).toContain("第一页计划"));
+    });
+    expect(container.textContent).not.toContain("最后一个计划");
+    expect(container.textContent).not.toContain("还没有执行计划");
   });
 
   it("separates registered tasks, runtime records, and redacted audit logs", async () => {

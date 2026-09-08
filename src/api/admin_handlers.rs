@@ -2456,6 +2456,18 @@ pub(crate) async fn admin_list_task_activity(
             Ok(jobs) => jobs,
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         };
+        let metadata_labels = match database
+            .list_current_metadata_reidentify_items(
+                &metadata_jobs
+                    .iter()
+                    .map(|job| job.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await
+        {
+            Ok(items) => activity_item_labels(items),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
         activities.extend(metadata_jobs.iter().map(|job| {
             json!({
                 "id": job.id,
@@ -2466,6 +2478,7 @@ pub(crate) async fn admin_list_task_activity(
                 "processedCount": job.processed_count,
                 "totalCount": job.total_count,
                 "cancelRequested": job.cancel_requested,
+                "currentItem": metadata_labels.get(&job.id),
             })
         }));
 
@@ -2493,6 +2506,18 @@ pub(crate) async fn admin_list_task_activity(
             Ok(jobs) => jobs,
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         };
+        let chapter_labels = match database
+            .list_current_chapter_detection_items(
+                &chapter_jobs
+                    .iter()
+                    .map(|job| job.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await
+        {
+            Ok(items) => activity_item_labels(items),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
         activities.extend(chapter_jobs.iter().map(|job| {
             json!({
                 "id": job.id,
@@ -2503,11 +2528,24 @@ pub(crate) async fn admin_list_task_activity(
                 "processedCount": job.processed_count,
                 "totalCount": job.total_count,
                 "cancelRequested": job.cancel_requested,
+                "currentItem": chapter_labels.get(&job.id),
             })
         }));
 
         let danmaku_jobs = match database.list_danmaku_match_jobs(Some(status), 0, 100).await {
             Ok(jobs) => jobs,
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        let danmaku_labels = match database
+            .list_current_danmaku_match_items(
+                &danmaku_jobs
+                    .iter()
+                    .map(|job| job.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await
+        {
+            Ok(items) => activity_item_labels(items),
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         };
         activities.extend(danmaku_jobs.iter().map(|job| {
@@ -2520,6 +2558,7 @@ pub(crate) async fn admin_list_task_activity(
                 "processedCount": job.processed_count,
                 "totalCount": job.total_count,
                 "cancelRequested": job.cancel_requested,
+                "currentItem": danmaku_labels.get(&job.id),
             })
         }));
 
@@ -2553,6 +2592,43 @@ pub(crate) async fn admin_list_task_activity(
             })
     });
     Json(json!({ "activities": activities })).into_response()
+}
+
+fn activity_item_labels(
+    items: Vec<(String, crate::storage::StoredJobActivityItem)>,
+) -> std::collections::HashMap<String, String> {
+    items
+        .into_iter()
+        .map(|(job_id, item)| (job_id, activity_item_label(&item)))
+        .collect()
+}
+
+fn activity_item_label(item: &crate::storage::StoredJobActivityItem) -> String {
+    if item.item_type != "EPISODE" {
+        return item.title.clone();
+    }
+    let series_title = item
+        .series_title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or(item.title.as_str());
+    let episode_number = item.episode_number.map(|number| format!("E{number:02}"));
+    let season_number = item.season_number.map(|number| format!("S{number:02}"));
+    let season_episode = match (season_number, episode_number) {
+        (Some(season), Some(episode)) => Some(format!("{season}{episode}")),
+        (Some(season), None) => Some(season),
+        (None, Some(episode)) => Some(episode),
+        (None, None) => None,
+    };
+    [
+        Some(series_title.to_owned()),
+        season_episode,
+        Some(item.title.clone()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
 pub(crate) async fn admin_list_scheduled_tasks(
@@ -2852,6 +2928,48 @@ pub(crate) async fn admin_update_scheduled_task_plan(
     {
         Ok(Some(plan)) => Json(json!({ "plan": scheduled_task_plan_json(&plan) })).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(StorageError::Conflict(message)) => api_error(
+            &headers,
+            StatusCode::CONFLICT,
+            lux::ApiErrorCode::InvalidRequest,
+            &message,
+        )
+        .into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+pub(crate) async fn admin_delete_scheduled_task_plan(
+    headers: HeaderMap,
+    Path(plan_id): Path<String>,
+    State(state): State<AppState>,
+) -> Response {
+    if let Err(response) = require_admin(&headers, &state, true).await {
+        return response;
+    }
+    let Some(database) = state.database.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match database.delete_scheduled_task_plan(&plan_id).await {
+        Ok(true) => {
+            record_audit_event(
+                &state,
+                &headers,
+                "SCHEDULE_PLAN_DELETED",
+                Some("scheduled_task_plan"),
+                Some(&plan_id),
+                "{}",
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => api_error(
+            &headers,
+            StatusCode::NOT_FOUND,
+            lux::ApiErrorCode::NotFound,
+            "执行计划不存在",
+        )
+        .into_response(),
         Err(StorageError::Conflict(message)) => api_error(
             &headers,
             StatusCode::CONFLICT,
@@ -3889,7 +4007,7 @@ pub(crate) fn admin_event_scope_for_audit(event_type: &str) -> AdminEventScope {
     if event_type.starts_with("USER_") || event_type == "LIBRARY_ACCESS_UPDATED" {
         return AdminEventScope::Users;
     }
-    if event_type.starts_with("LIBRARY_") || event_type == "SCHEDULE_UPDATED" {
+    if event_type.starts_with("LIBRARY_") || event_type.starts_with("SCHEDULE_") {
         return AdminEventScope::Libraries;
     }
     if event_type.starts_with("METADATA_") {
