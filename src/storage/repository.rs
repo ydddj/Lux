@@ -21,6 +21,8 @@ use uuid::Uuid;
 mod catalog;
 #[path = "database_cleanup.rs"]
 mod database_cleanup;
+#[path = "device_pairings.rs"]
+mod device_pairings;
 #[path = "emby_migration.rs"]
 mod emby_migration;
 #[path = "jobs.rs"]
@@ -43,6 +45,7 @@ mod sessions;
 mod users;
 
 pub use database_cleanup::DatabaseLifecycleCleanupReport;
+pub(crate) use device_pairings::DevicePairingRedeemResult;
 
 pub(crate) use emby_migration::{
     EmbyMigrationHandledItemBatch, EmbyMigrationImportRecordBatch, EmbyMigrationItemMatchBatch,
@@ -298,6 +301,20 @@ impl Database {
     }
 
     async fn begin_metadata_write_transaction(
+        &self,
+    ) -> Result<sqlx::Transaction<'_, Any>, StorageError> {
+        let transaction = if self.backend == DatabaseBackend::Sqlite {
+            self.pool.begin_with("BEGIN IMMEDIATE").await
+        } else {
+            self.pool.begin().await
+        };
+        transaction.map_err(|source| StorageError::Sqlx {
+            path: self.path.clone(),
+            source,
+        })
+    }
+
+    pub(crate) async fn begin_scan_write_transaction(
         &self,
     ) -> Result<sqlx::Transaction<'_, Any>, StorageError> {
         let transaction = if self.backend == DatabaseBackend::Sqlite {
@@ -1605,6 +1622,7 @@ pub(crate) struct StoredCatalogRow {
     pub(crate) item_type: String,
     pub(crate) parent_id: Option<String>,
     pub(crate) series_id: Option<String>,
+    pub(crate) series_name: Option<String>,
     pub(crate) season_number: Option<i64>,
     pub(crate) episode_number: Option<i64>,
     pub(crate) title: String,
@@ -2381,6 +2399,7 @@ pub(crate) struct StoredStrmMediaSource {
 #[derive(Debug)]
 pub(crate) struct StoredImageIdentity {
     pub(crate) item_type: String,
+    pub(crate) original_language: Option<String>,
     pub(crate) provider_name: Option<String>,
     pub(crate) provider_id: Option<String>,
     pub(crate) season_number: Option<i64>,
@@ -2629,6 +2648,24 @@ pub(crate) struct NewAccessToken<'a> {
     pub(crate) client_name: &'a str,
     pub(crate) device_name: &'a str,
     pub(crate) client_version: &'a str,
+    pub(crate) device_type: Option<&'a str>,
+}
+
+pub(crate) struct NewDevicePairing<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) user_id: &'a str,
+    pub(crate) secret_hash: &'a [u8],
+    pub(crate) expires_at: i64,
+}
+
+pub(crate) struct NewDeviceAccessToken<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) token_hash: &'a [u8],
+    pub(crate) device_id: &'a str,
+    pub(crate) client_name: &'a str,
+    pub(crate) device_name: &'a str,
+    pub(crate) client_version: &'a str,
+    pub(crate) device_type: Option<&'a str>,
 }
 
 pub(crate) struct NewLibrary<'a> {

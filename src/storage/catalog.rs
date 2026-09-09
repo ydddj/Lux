@@ -1363,6 +1363,7 @@ impl Database {
              )
              SELECT mi.id AS item_id, mi.library_id, mi.item_type,
                     mi.parent_id, mi.series_id, mi.season_number, mi.episode_number,
+                    series.title AS series_name,
                     mi.title, mi.sort_title, mi.original_title, mi.overview,
                     mi.production_year, mi.rating, mi.rating_source, mi.runtime_ticks,
                     (SELECT id FROM item_images WHERE item_id = mi.id AND image_type = 'POSTER'
@@ -1384,6 +1385,7 @@ impl Database {
                     mt.is_forced AS stream_is_forced
              FROM ranked
              JOIN media_items mi ON mi.id = ranked.id
+             LEFT JOIN media_items series ON series.id = mi.series_id
              LEFT JOIN media_sources ms
                ON ms.item_id = mi.id
               AND EXISTS (
@@ -2000,6 +2002,7 @@ impl Database {
                         item_type: row.get("item_type"),
                         parent_id: row.get("parent_id"),
                         series_id: row.get("series_id"),
+                        series_name: row.try_get("series_name").ok().flatten(),
                         season_number: row.get("season_number"),
                         episode_number: row.get("episode_number"),
                         title: row.get("title"),
@@ -5604,8 +5607,8 @@ impl Database {
         self.query(
             "INSERT INTO access_tokens (
                 id, token_hash, user_id, device_id, client_name,
-                device_name, client_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                device_name, client_version, device_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(token.id)
         .bind(token.token_hash)
@@ -5614,6 +5617,7 @@ impl Database {
         .bind(token.client_name)
         .bind(token.device_name)
         .bind(token.client_version)
+        .bind(token.device_type)
         .execute(&self.pool)
         .await
         .map(|_| ())

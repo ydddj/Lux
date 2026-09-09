@@ -58,6 +58,11 @@ export function imageUrl(item: MediaItem, type: "poster" | "fanart" | "thumb" | 
   return tag ? `${path}?tag=${encodeURIComponent(tag)}` : path;
 }
 
+export function posterUrlWithFallback(item: MediaItem, series?: MediaItem) {
+  return imageUrl(item)
+    ?? (item.itemType === "SEASON" && series?.itemType === "SERIES" ? imageUrl(series) : undefined);
+}
+
 export function runtimeLabel(ticks?: number | null) {
   if (!ticks) return undefined;
   const minutes = Math.round(ticks / 10_000_000 / 60);
@@ -220,7 +225,9 @@ function ContinueWatchingCard({ item }: { item: MediaItem }) {
   const image = imageUrl(item, "fanart") ?? imageUrl(item);
   const progress = playbackProgress(item);
   const remaining = remainingRuntimeLabel(item);
-  const subtitle = mediaTypeLabel(item.itemType);
+  const subtitle = item.itemType === "EPISODE" && item.seriesName
+    ? item.seriesName
+    : mediaTypeLabel(item.itemType);
   return (
     <Link className="lux-continue-card" to={`/watch/${item.id}`} aria-label={`继续播放 ${mediaTitle(item)}`}>
       <div className="lux-media-art">

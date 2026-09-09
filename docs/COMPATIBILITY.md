@@ -14,6 +14,14 @@ Lux 主程序统一走 `ScraperPluginClient`，不再编译 TMDb client/adapter 
 
 本文档是目标客户端兼容性的唯一事实来源。未填入实测版本和证据前，不得宣称兼容。
 
+## LUX-247 Emby 局域网发现（2026-09-09）
+
+Lux 服务端监听 UDP `7359`，对大小写不敏感的 `who is EmbyServer?` UTF-8/UTF-16LE 请求返回 Emby 兼容的
+`Address`、`Id`、`Name` JSON。`LUX_DISCOVERY_ADVERTISE_URL` 可为 Docker、反向代理和多网卡部署指定客户端可达的
+HTTP(S) 基地址；未设置时服务端按请求来源选择本机接口和 HTTP 端口。协议、地址校验、无关包过滤和关闭生命周期已有
+`tests/discovery.rs` 与 `discovery` 模块单测覆盖。该记录只证明 Lux 服务端协议，不宣称 Prism 或其他客户端已完成真实
+局域网发现；Docker 多网卡/广播验证和客户端以 `Id` 去重、并行探测两个地址的行为待 Prism 阶段验证。
+
 ## LUX-144 TMDb 语言组与详情回退（2026-09-08）
 
 TMDb 语言配置由外置 `Lux-plugins` 的 `org.lux.tmdb` 提供 73 个 canonical 语言组；`zh-CN`/`zh-SG`、
@@ -27,6 +35,13 @@ TMDb 语言配置由外置 `Lux-plugins` 的 `org.lux.tmdb` 提供 73 个 canoni
 验证证据：Lux 主仓库 `cargo test --locked --test plugins`、`plugin_update_tests` 和 Web `plugin-library.test.ts` 通过；
 外置插件的 settings、TMDb client、插件 metadata 单元测试及发布 manifest 测试通过。该记录证明请求/配置行为，不替代 TMDb
 真实账号数据覆盖率或第三方客户端 UI 兼容性实测。
+
+## LUX-249 TMDb 原语言模式（2026-09-09）
+
+TMDb 插件的 `originalLanguageEnabled` 默认关闭。启用后，电影/剧集标题优先使用 TMDb 原标题，其他文字字段从同一详情
+响应的 `translations` 中选择原语言，图片按原语言、无语言、英语优先；缺少原语言翻译时回退当前首选语言。详情已携带的
+`images` 不重复请求，独立图片候选最多一次上游请求；季/集在插件冷缓存时最多补一次父剧详情来获得原语言。该记录只证明
+插件配置和请求策略，不宣称所有 TMDb 资源都提供完整的原语言翻译或图片覆盖。
 
 ## Emby 媒体删除兼容合同
 

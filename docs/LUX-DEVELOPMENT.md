@@ -231,6 +231,9 @@ Lux 的核心价值不是功能数量，而是：
   `writeToMetadata` 时，同时写入 /config/metadata/library/<shard>/<item-id>/。匹配选择时按所属
   媒体库启用的图片类型逐项处理：海报、徽标、缩略图等单图类型只在没有更高优先级本地图片时写入；背景图允许多张，主来源和补充来源的图片按 URL 去重并按优先级追加。扫描发现的媒体目录图片仍按本地优先
   规则登记和提供。
+- 季条目没有自己的海报时，Lux Web 可以临时展示父剧集海报作为视觉回退；该回退不创建季的
+  `item_images` 记录、不写回季目录，也不改变季自身图片的来源。季自身海报后来补全后，必须优先
+  展示真实季海报。
 
 首版不阻塞但数据模型需预留：
 
@@ -827,6 +830,7 @@ pub async fn get_item(
 - client_name
 - device_name
 - client_version
+- device_type，可空；客户端平台（例如 `macOS`、`Windows`），旧令牌为空
 - created_at
 - last_seen_at
 - revoked_at
@@ -1249,11 +1253,13 @@ locked local value
 
 空字符串不应覆盖有效值。TMDb 语言回退按选定语言组顺序逐字段补全，而不是整条记录一次性切换语言；详情使用一次 `append_to_response=translations`，回退开关关闭时忽略翻译载荷，首选语言已获得的字段不会被覆盖。
 
+TMDb 插件可选启用“原语言”模式。电影和剧集的标题优先使用 TMDb `original_title`/`original_name`，简介、tagline、网站和季/集文字从同一次详情响应的 `translations` 中选择 `original_language` 对应语言；对应翻译缺失时保留首选语言结果。启用时跳过中文标题别名替换。原语言图片按原语言、无语言、英语的顺序优先，已有详情图片在本地筛选，不因该选项重复请求详情。季/集的原语言继承父剧；插件可为冷缓存的父剧补一次详情请求，并在进程内缓存结果。
+
 ### 13.3 刮削器客户端
 
 - TMDb 外置插件的客户端同时兼容 v3 API Key 和历史 v4 Read Access Token。管理员通过 TMDb 插件详情配置自己的 API Key。
 - TMDb 插件自行决定默认凭据、管理员 API Key 和历史 token 的优先级；Lux 不内置、不解析这些凭据，也不在自身 API 或日志中返回它们。
-- TMDb 插件配置包括首选语言组、语言回退开关和有序回退语言组列表，由宿主保存于 `/config/plugin-config/org.lux.tmdb.json` 并通过 `LUX_PLUGIN_CONFIG_PATH` 传给外置插件；宿主和插件都会将旧的地区 locale 归一化为 canonical 语言组，敏感字段仍不可返回。
+- TMDb 插件配置包括首选语言组、语言回退开关、有序回退语言组列表和默认关闭的原语言开关，由宿主保存于 `/config/plugin-config/org.lux.tmdb.json` 并通过 `LUX_PLUGIN_CONFIG_PATH` 传给外置插件；宿主和插件都会将旧的地区 locale 归一化为 canonical 语言组，敏感字段仍不可返回。
 - 主进程的元数据匹配、候选搜索、图片候选和合集请求统一通过媒体库有序刮削器协议；主进程不得直接访问第三方元数据 API。主刮削器先处理全部请求能力，备用刮削器按能力逐项接管主来源空、无效、不支持或重试失败的项目；补充刮削器只对已确认条目继续补全和合并内容，不重新决定媒体身份。
 - 插件内部使用统一 HTTP client、超时、16 并发配额、每秒 32 次请求限流、重试和 User-Agent。
 - 插件 stdin/stdout RPC 支持有界多路复用；响应按 request ID 分发并允许乱序返回，插件进程故障或超时会结束其全部 pending 请求。
@@ -2093,6 +2099,10 @@ services:
 | LUX-242 | web/src/features/player/playback-selection.ts、web/src/features/player/PlayerPage.tsx、web/tests/player-playback.test.tsx、web/tests/player-fallback.test.tsx、web/tests/strm-caption-compatibility.test.tsx；远程管线接入和终止错误策略 |
 | LUX-243 | docs/COMPATIBILITY.md、scripts/player-matroska-smoke.mjs、web/tests/；远程 Matroska 客户端管线历史阶段门（当前不实施） |
 | LUX-245 | web/src/features/player/playback-selection.ts、web/src/features/player/PlayerPage.tsx、web/src/features/player/remote-mkv-caption-reader.ts、web/tests/；远程 STRM 浏览器直连与客户端解码 fallback |
+| LUX-247 | docs/LUX-DEVELOPMENT.md、docs/COMPATIBILITY.md、src/discovery.rs、src/main.rs、compose.yaml、docs/DEPLOYMENT.md；Emby 兼容局域网发现 |
+| LUX-248 | docs/LUX-DEVELOPMENT.md、docs/decisions/041-device-pairing.md、migrations/0119_device_pairings.sql、migrations-postgres/0119_device_pairings.sql、src/auth/device_pairings.rs、src/security.rs、src/storage/device_pairings.rs、src/storage/catalog.rs、src/storage/repository.rs、src/storage/users.rs、src/storage/mod.rs、src/auth/emby.rs、src/auth/mod.rs、src/api/legacy.rs、src/api/routes.rs、src/api/users.rs、tests/device_pairings.rs、tests/admin_health.rs、tests/danmaku.rs、tests/ready_version.rs、tests/scanner.rs、tests/storage.rs；Lux Prism 一次性设备配对 |
+| LUX-249 | docs/LUX-DEVELOPMENT.md、docs/COMPATIBILITY.md、src/application/scraper.rs、src/application/images.rs、src/application/candidates.rs、src/storage/media.rs、src/storage/repository.rs、web/src/features/admin/AdminPluginsPage.tsx、web/tests/plugin-library.test.ts；TMDb 原语言文字与图片模式 |
+| LUX-250 | docs/LUX-DEVELOPMENT.md、web/src/features/home/media.tsx、web/src/features/detail/MediaDetailPage.tsx、web/tests/home-media.test.tsx、web/tests/media-detail.test.tsx；季海报缺失时回退父剧海报 |
 
 ### 阶段 0：仓库和工程纪律
 
@@ -5845,6 +5855,55 @@ cue 和 Worker。
 PostgreSQL 集成测试目标已编译，但其 4 个运行测试因本机没有可用 PostgreSQL 实例而保持 ignored，
 因此真实 PostgreSQL 迁移/WAL 证据仍待可用测试环境复测。
 
+#### LUX-247：Emby 兼容局域网发现
+
+为 Lux Prism 的局域网服务器发现增加独立 UDP 服务。服务监听 UDP `7359`，仅处理包含
+`who is EmbyServer?` 的 UTF-8 或 UTF-16LE 请求，并返回 Emby 兼容的 JSON：
+
+```json
+{
+  "Address": "http://192.168.1.20:8097",
+  "Id": "server-id",
+  "Name": "Lux Server"
+}
+```
+
+`Address` 默认根据请求来源选择本机网络接口和 Lux HTTP 端口；容器、反向代理或多网卡场景可以用
+`LUX_DISCOVERY_ADVERTISE_URL` 显式指定对客户端可达的 HTTP(S) 基地址。该地址只允许 HTTP/HTTPS，
+拒绝 userinfo、query 和 fragment。监听地址可用 `LUX_DISCOVERY_BIND_ADDR` 覆盖，默认
+`0.0.0.0:7359`，主要用于测试和受限网络部署。
+
+Prism 必须校验发现 JSON 中的地址，并同时探测返回的 `Address` 与 UDP 响应包来源地址加 Lux HTTP
+端口；以 `Id` 去重，不得把 UDP 返回的地址直接当作已验证的连接地址。发现服务不接触认证令牌，
+不记录完整 UDP 数据包或地址中的凭据。
+
+验收：
+
+- [x] Lux 启动后监听 UDP `7359`，有效的大小写不敏感 `who is EmbyServer?` 请求返回 `Address`、`Id`、`Name` 三个字段。
+- [x] UTF-8 和 UTF-16LE 请求都能得到同编码的 JSON 响应；无关、空包和来源端口为 0 的数据包不响应。
+- [x] `LUX_DISCOVERY_ADVERTISE_URL` 通过 HTTP(S) 地址校验，拒绝 userinfo、query、fragment 和无效地址；未配置时使用请求对应的本机接口地址。
+- [x] UDP 服务随 HTTP 服务收到 Ctrl-C/SIGTERM 后退出，不遗留任务；发现错误不会泄露请求内容、令牌或完整外部 URL。
+- [x] Compose 暴露 `7359/udp`，部署文档说明 Docker、反向代理和多网卡场景的显式广播地址配置；不改变现有 HTTP、Emby 或数据库合同。
+
+验证：`cargo test --locked --lib discovery`、`cargo fmt --all -- --check`、
+`cargo clippy --locked --all-targets --all-features -- -D warnings`，并在 Docker 网络中用固定夹具验证
+UDP 请求、响应和来源地址候选。记录 `uname -m`；本机 ARM64 结果不外推 NAS/x86_64 性能。
+
+依赖：LUX-246。
+
+明确不做：
+
+- 不在本任务实现 Prism 客户端、服务器 ID 去重逻辑或二维码设备配对；后者属于 LUX-248。
+- 不新增认证、广播加密、通用 UDP 代理或额外 Emby 端点。
+
+验证记录（2026-09-09，`uname -m=arm64`）：`cargo test --locked --test discovery`（3 passed）、
+`cargo test --locked --lib discovery`（4 passed）、`cargo build --locked`、
+`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets --all-features -- -D warnings` 和
+`docker compose config --quiet` 均通过。`cargo test --locked --all-targets` 的发现测试及其他已运行目标通过，
+但在既有 `tests/libraries_api.rs:admin_can_list_and_update_library_schedules_from_operations_page` 中，
+`AUTO_LIBRARY_COVER` 调度更新返回 503；该测试单独重跑仍复现，且本任务未修改其覆盖的代码。真实 Docker
+网络中的 UDP 广播验证仍待在目标部署环境执行。本机 ARM64 结果不外推 NAS/x86_64 性能。
+
 补充记录（2026-09-08）：0118 迁移将 `reconciliation_scan_entries` 的主键列顺序调整为
 `(job_id, entry_type, library_root_id, relative_path)`，删除与新主键重复的宽索引；将
 `scan_job_targets` 的三个阶段索引限制为 `PENDING/FAILED`，并删除未发现独立查询路径的
@@ -5852,6 +5911,148 @@ PostgreSQL 集成测试目标已编译，但其 4 个运行测试因本机没有
 处理；`media_items` 未发现可安全删除的明确冗余索引，因此保持不变。新增测试会先运行 1–117
 迁移、写入代表性旧数据，再单独运行 118，确认扫描条目、扫描目标和外键约束均被保留。
 该验证覆盖 SQLite 的真实升级路径；PostgreSQL 仍需在可用实例上运行被忽略的集成测试。
+
+#### LUX-248：Lux Prism 一次性设备配对
+
+为 Lux Prism 提供仅限 Lux 的一次性设备配对合同。Web 登录会话通过
+`POST /api/v1/auth/device-pairings` 创建一个有效期 5 分钟的票据；创建接口必须同时
+验证 `lux_session` 会话和 `x-csrf-token`，不接受共享管理员 API Key。服务端只保存随机
+`secret` 的 SHA-256 哈希，不保存或记录完整二维码 URI。Web 使用当前页面 origin 拼接
+二维码 URI：
+
+```text
+lux-prism://pair?v=1&server=<percent-encoded-origin>&id=<pairingId>&secret=<secret>&expiresAt=<unix-seconds>
+```
+
+`server` 必须是二维码生成页面的当前 HTTP(S) origin；Prism 扫码后应展示服务器名称和
+地址，用户确认后向该地址调用兑换接口。Emby 不生成此二维码。
+
+创建响应为：
+
+```json
+{
+  "pairingId": "019...",
+  "secret": "url-safe-random-secret",
+  "expiresAt": 1770000000
+}
+```
+
+Prism 通过 `POST /api/v1/device-pairings/{pairingId}/redeem` 兑换，提交：
+
+```json
+{
+  "secret": "url-safe-random-secret",
+  "deviceId": "stable-prism-device-id",
+  "deviceName": "Qoo's Mac",
+  "platform": "macOS",
+  "version": "0.1.0"
+}
+```
+
+服务端在一个数据库事务中校验票据、原子标记已消费并创建已有 Emby
+`access_tokens` 记录；新记录的 `client_name` 固定为 `Lux Prism`，`device_type` 保存
+`platform`。兑换成功响应为：
+
+```json
+{
+  "accessToken": "returned-once",
+  "userId": "user-id",
+  "serverId": "server-id"
+}
+```
+
+`accessToken` 只在成功兑换响应中返回，不能写入日志、SQLite/PostgreSQL 或二维码缓存。
+兑换不需要 Web session，但必须提交有效 secret；票据不存在、secret 错误、已过期、已取消
+或已消费分别返回稳定的 `DEVICE_PAIRING_NOT_FOUND`、`DEVICE_PAIRING_INVALID_SECRET`、
+`DEVICE_PAIRING_EXPIRED`、`DEVICE_PAIRING_CANCELLED` 和 `DEVICE_PAIRING_CONSUMED` 错误码。
+取消使用 `DELETE /api/v1/auth/device-pairings/{pairingId}`，同样要求当前创建者的 Web
+session + CSRF，且不能取消其他用户的票据。
+
+创建和兑换分别按用户/来源地址限流；超限返回 `429 TOO MANY REQUESTS`、错误码
+`RATE_LIMITED` 和不超过 60 秒的 `Retry-After`。所有设备字段在 API 边界限制长度并拒绝空值，
+请求体限制为 16 KiB。取消是显式资源操作：不存在、已取消或已消费的票据不再产生新的 token。
+
+验收：
+
+- [x] 从空 SQLite 和已有 SQLite 数据库升级到 0119；PostgreSQL 迁移保持相同表、字段和约束。
+- [x] 未登录、缺少/错误 CSRF 或仅使用共享 API Key 不能创建/取消票据。
+- [x] 创建返回 5 分钟有效的票据和一次性 secret，数据库只保存 secret 哈希。
+- [x] 错误 secret、过期、取消、已消费和不存在票据分别返回上面定义的错误码；设备字段越界被拒绝。
+- [x] 两个并发兑换请求至多一个成功，成功者获得可调用 Emby API 的 AccessToken，另一个得到已消费错误。
+- [x] 兑换事务失败时票据和 AccessToken 一起回滚；取消权限按创建用户隔离。
+- [x] 创建和兑换限流可验证，限流响应不包含 secret、token 或完整 URI。
+- [x] 运行 `cargo test --locked --test device_pairings`、`cargo test --locked --lib security`、
+  `cargo fmt --all -- --check`、`cargo clippy --locked --all-targets --all-features -- -D warnings`，
+  并在可用 PostgreSQL 环境运行对应迁移/并发测试。
+
+验证记录（2026-09-09，`uname -m=arm64`）：`cargo test --locked --test device_pairings`
+（8 passed）、`cargo test --locked --lib security`（3 passed）、`cargo build --locked`、
+`cargo test --locked --all-targets`（所有目标通过；库测试 437 passed、4 ignored）、
+`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets --all-features -- -D warnings`
+和 `git diff --check` 均通过。测试期间发现观测子进程并行启动会争用 LUX-247 的默认 UDP
+`7359`，已让观测测试使用 `127.0.0.1:0` 的临时发现端口；生产默认监听地址未改变。
+PostgreSQL 集成测试目标已编译，但本机没有可用 PostgreSQL 实例，4 个测试保持 ignored，
+因此真实 PostgreSQL 迁移/并发证据仍待可用环境复测。本机 ARM64 结果不外推 Windows、NAS
+或 x86_64 性能。
+
+依赖：LUX-247。
+
+明确不做：
+
+- 不支持 Emby 的二维码配对，不在 Prism 或服务器保存相机画面。
+- 不改变现有 Web session 或普通 Emby 登录合同，不引入离线写队列。
+- 不在本任务实现 Prism 客户端、二维码渲染组件、摄像头权限或系统凭据库存储。
+
+#### LUX-249：TMDb 原语言文字与图片模式
+
+范围：为外置 `org.lux.tmdb` 增加默认关闭的 `originalLanguageEnabled` 配置。启用后，电影和剧集标题使用 TMDb 原标题，其他文字字段优先使用 `original_language` 对应的翻译；季/集继承父剧原语言。电影、剧集详情响应中已经包含的图片按原语言、无语言、英语优先；独立图片请求仍只发一次上游请求，在需要时请求全语言并本地筛选。宿主通过可选的 `originalLanguage` 图片请求提示传递已持久化的原语言，不改变现有插件的默认行为，也不增加数据库迁移。
+
+验收：
+
+- [ ] TMDb manifest 和 Web 管理页暴露默认关闭的“原语言”开关，旧配置读取后保持关闭且可保存/恢复。
+- [ ] 启用后电影、剧集的标题、简介等文字字段按原语言优先，缺失时回退首选语言；中文标题别名替换不覆盖原语言标题。
+- [ ] 启用后详情图片和独立图片候选按原语言、无语言、英语排序；季/集文字和图片使用父剧原语言。
+- [ ] 电影/剧集详情复用已有 `translations` 和 `images` 载荷；独立图片查询最多一次请求，季/集冷缓存最多补一次父剧详情请求。
+- [ ] 未启用时现有语言、图片筛选、请求字段和插件 RPC 行为保持不变；不新增数据库迁移。
+
+验证：
+
+- 外置 `Lux-plugins`：`cargo test --locked --lib`、`cargo test --locked --bin lux-plugin-tmdb`
+- Lux 主仓库：`cargo test --locked --test scraper`、`cargo test --locked --test image_api`、`cargo test --locked --test plugins`
+- Web：`pnpm --dir web test`、`pnpm --dir web build`
+- `cargo fmt --all -- --check`、`cargo clippy --locked --all-targets --all-features -- -D warnings`
+
+依赖：LUX-144、LUX-195。
+
+明确不做：
+
+- 不将“原语言”伪装成新的 TMDb canonical locale，也不为搜索候选逐项追加详情请求。
+- 不改变 TMDb Provider ID、metadata RPC 方法名称或数据库 schema。
+
+#### LUX-250：季海报缺失时回退父剧海报
+
+范围：当季条目没有自己的 `POSTER` 图片时，Lux Web 在已知父剧集上下文的页面中展示父剧集海报；
+季条目自身的海报始终优先。回退仅属于展示层，不复制或登记图片，不改变图片编辑、元数据写回和
+图片来源记录。后续元数据补全得到季海报后，页面刷新即可切换到真实季海报。
+
+验收：
+
+- [x] 剧集详情的季卡片没有季海报时显示父剧集海报。
+- [x] 季详情没有季海报时显示父剧集海报；季详情已有自己的海报时继续显示季海报。
+- [x] 回退不调用季图片端点、不创建或修改图片记录，且不影响电影、剧集和单集图片选择。
+- [x] 前端单测覆盖季海报缺失、真实季海报优先和父剧上下文缺失三种情况。
+
+验证：
+
+- `pnpm --dir web test`
+- `pnpm --dir web build`
+
+依赖：LUX-060、LUX-061、LUX-100。
+
+明确不做：
+
+- 不把父剧海报复制到季目录或写入 `/config/metadata/library`。
+- 不修改 TMDb 插件、数据库 schema、Emby 图片 DTO 或图片来源优先级。
 
 ## 26. 风险与缓解
 

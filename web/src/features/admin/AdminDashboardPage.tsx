@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Clock3, Cpu, Database, MemoryStick, Pencil, Server, Users, X } from "lucide-react";
+import { Clock3, Cpu, Database, MemoryStick, Pencil, Users, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Link } from "react-router-dom";
 import { AdminDashboardActivity } from "./AdminDashboardActivity";
 import { AdminDashboardNowPlaying } from "./AdminDashboardNowPlaying";
 import { api } from "../../lib/api/client";
@@ -90,9 +89,12 @@ export function AdminDashboardPage() {
                 </div>
                 <OverviewInfo className="lux-bento-version" label="版本" value={`v${server.version}`} />
               </div>
-              <div className="lux-bento-hero-icon" aria-hidden="true">
-                <Server size={20} />
-              </div>
+              <OverviewInfo
+                className="lux-bento-hero-runtime"
+                icon={<Clock3 className="lux-bento-inline-icon" size={14} strokeWidth={1.8} />}
+                label="运行时长"
+                value={formatRuntime(health.runtime.seconds)}
+              />
             </div>
 
             <div className="lux-admin-overview-identity">
@@ -109,35 +111,24 @@ export function AdminDashboardPage() {
                 </button>
               </div>
             </div>
+          </div>
 
-            <div className="lux-bento-hero-footer">
-              <OverviewInfo icon={<Clock3 className="lux-bento-inline-icon" size={14} strokeWidth={1.8} />} label="运行时长" value={formatRuntime(health.runtime.seconds)} />
+          {/* Media Count Cards */}
+          <div className="lux-bento-card lux-bento-card-media-count">
+            <div className="lux-bento-card-header">
+              <span className="lux-bento-card-title">电影数量</span>
+            </div>
+            <div className="lux-bento-metric-body">
+              <strong className="lux-admin-overview-metric-value lux-bento-big-num">{formatCount(stats.movieCount)}</strong>
             </div>
           </div>
 
-          {/* Media Assets Bento Card */}
-          <div className="lux-bento-card lux-bento-card-media">
+          <div className="lux-bento-card lux-bento-card-media-count">
             <div className="lux-bento-card-header">
-              <span className="lux-bento-card-title">媒体库</span>
-              <span className="lux-bento-card-meta">{formatCount(stats.movieCount + stats.seriesCount)} 项</span>
+              <span className="lux-bento-card-title">剧集数量</span>
             </div>
-            <div className="lux-bento-media-grid">
-              <div className="lux-bento-media-subcard">
-                <div className="lux-bento-subcard-header">
-                  <small>电影数量</small>
-                </div>
-                <strong className="lux-admin-overview-metric-value">{formatCount(stats.movieCount)}</strong>
-              </div>
-              <div className="lux-bento-media-subcard">
-                <div className="lux-bento-subcard-header">
-                  <small>剧集数量</small>
-                </div>
-                <strong className="lux-admin-overview-metric-value">{formatCount(stats.seriesCount)}</strong>
-              </div>
-            </div>
-            <div className="lux-bento-card-footer">
-              <small>元数据已就绪</small>
-              <Link to="/admin/libraries" className="lux-bento-link">进入媒体库 →</Link>
+            <div className="lux-bento-metric-body">
+              <strong className="lux-admin-overview-metric-value lux-bento-big-num">{formatCount(stats.seriesCount)}</strong>
             </div>
           </div>
 

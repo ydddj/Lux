@@ -4,9 +4,33 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
-import { ContinueWatchingRail, MediaCard, MediaRail } from "../src/features/home/media";
+import { ContinueWatchingRail, MediaCard, MediaRail, posterUrlWithFallback } from "../src/features/home/media";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+describe("posterUrlWithFallback", () => {
+  it("uses the series poster when a season has no poster", () => {
+    expect(posterUrlWithFallback(
+      { id: "season-1", itemType: "SEASON" },
+      { id: "series-1", itemType: "SERIES", imageTags: { poster: "series-poster" } },
+    )).toBe("/api/v1/items/series-1/images/poster?tag=series-poster");
+  });
+
+  it("keeps a season poster ahead of the series fallback", () => {
+    expect(posterUrlWithFallback(
+      { id: "season-1", itemType: "SEASON", imageTags: { poster: "season-poster" } },
+      { id: "series-1", itemType: "SERIES", imageTags: { poster: "series-poster" } },
+    )).toBe("/api/v1/items/season-1/images/poster?tag=season-poster");
+  });
+
+  it("does not use a fallback without a series parent", () => {
+    expect(posterUrlWithFallback({ id: "season-1", itemType: "SEASON" })).toBeUndefined();
+    expect(posterUrlWithFallback(
+      { id: "movie-1", itemType: "MOVIE" },
+      { id: "series-1", itemType: "SERIES", imageTags: { poster: "series-poster" } },
+    )).toBeUndefined();
+  });
+});
 
 describe("ContinueWatchingRail", () => {
   let container: HTMLDivElement;
@@ -54,6 +78,29 @@ describe("ContinueWatchingRail", () => {
       .toBe("/api/v1/items/episode-1/images/thumb?tag=episode-thumb-tag");
     expect(container.querySelector(".lux-progress span")?.getAttribute("style")).toContain("width: 33%");
     expect(container.querySelector(".lux-continue-remaining")?.textContent).toBe("还剩 4m");
+  });
+
+  it("shows the series name below an episode resume title", () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const episode = {
+      id: "episode-2",
+      title: "第二集",
+      itemType: "EPISODE" as const,
+      seriesName: "示例剧集",
+    };
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <ContinueWatchingRail items={[episode]} />
+        </MemoryRouter>,
+      );
+    });
+
+    expect(container.querySelector(".lux-continue-copy strong")?.textContent).toBe("第二集");
+    expect(container.querySelector(".lux-continue-copy small")?.textContent).toBe("示例剧集");
   });
 
   it("shows latest media ratings as numeric TMDb-blue pills", () => {
