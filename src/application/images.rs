@@ -3,8 +3,8 @@ use std::{
     fmt,
     net::IpAddr,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock, Weak},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use reqwest::{Client, Url, header::CONTENT_TYPE};
@@ -44,11 +44,83 @@ const IMAGE_ATTEMPT_LEASE: Duration = Duration::from_secs(5 * 60);
 const IMAGE_RETRY_BASE_SECONDS: i64 = 60;
 const IMAGE_RETRY_MAX_SECONDS: i64 = 6 * 60 * 60;
 const IMAGE_GLOBAL_CONCURRENCY: usize = 16;
+const INTERNAL_IMAGE_WRITE_MARKER_TTL: Duration = Duration::from_secs(15);
 pub(crate) const MAX_IMAGE_VARIANTS: usize = 4;
 
 static IMAGE_GLOBAL_DOWNLOAD_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static IMAGE_GLOBAL_WRITE_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static IMAGE_ITEM_WRITE_LOCKS: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> = OnceLock::new();
+static INTERNAL_IMAGE_WRITES: OnceLock<StdMutex<HashMap<PathBuf, InternalImageWriteMarker>>> =
+    OnceLock::new();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InternalImageWriteMarker {
+    expires_at: Instant,
+    expected_stamp: Option<ImageFileStamp>,
+}
+
+fn internal_image_write_registry() -> &'static StdMutex<HashMap<PathBuf, InternalImageWriteMarker>>
+{
+    INTERNAL_IMAGE_WRITES.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+pub(crate) fn register_internal_image_write(path: &Path) {
+    let now = Instant::now();
+    let mut registry = match internal_image_write_registry().lock() {
+        Ok(registry) => registry,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    registry.retain(|_, marker| marker.expires_at > now);
+    registry.insert(
+        path.to_owned(),
+        InternalImageWriteMarker {
+            expires_at: now + INTERNAL_IMAGE_WRITE_MARKER_TTL,
+            expected_stamp: None,
+        },
+    );
+}
+
+fn finalize_internal_image_write(path: &Path, expected_stamp: Option<ImageFileStamp>) {
+    let now = Instant::now();
+    let mut registry = match internal_image_write_registry().lock() {
+        Ok(registry) => registry,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    registry.retain(|_, marker| marker.expires_at > now);
+    if let Some(marker) = registry.get_mut(path) {
+        marker.expected_stamp = expected_stamp;
+    }
+}
+
+pub(crate) async fn should_suppress_internal_image_write(path: &Path) -> bool {
+    let now = Instant::now();
+    let marker = {
+        let mut registry = match internal_image_write_registry().lock() {
+            Ok(registry) => registry,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        registry.retain(|_, marker| marker.expires_at > now);
+        registry.get(path).copied()
+    };
+    let Some(marker) = marker else {
+        return false;
+    };
+    let Some(expected_stamp) = marker.expected_stamp else {
+        return true;
+    };
+    if image_file_stamp(path).await.ok().flatten() == Some(expected_stamp) {
+        return true;
+    }
+
+    let mut registry = match internal_image_write_registry().lock() {
+        Ok(registry) => registry,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if registry.get(path).copied() == Some(marker) {
+        registry.remove(path);
+    }
+    false
+}
 
 fn global_image_download_permits() -> Arc<Semaphore> {
     IMAGE_GLOBAL_DOWNLOAD_PERMITS
@@ -332,25 +404,6 @@ impl ImageWriteService {
             .local_image_exists_at_index(item_id, normalized_type, image_index)
             .await?
         {
-            if image_index == 0
-                && normalized_type == "THUMB"
-                && self
-                    .database
-                    .find_item_image_source(item_id, "THUMB")
-                    .await?
-                    .is_some_and(|value| value.eq_ignore_ascii_case("STRM_FFMPEG"))
-            {
-                return self
-                    .download_item_image_attempt_at_index(
-                        item_id,
-                        normalized_type,
-                        image_url,
-                        source,
-                        image_index,
-                        true,
-                    )
-                    .await;
-            }
             return Ok(None);
         }
         self.download_item_image_attempt_at_index(
@@ -640,9 +693,11 @@ impl ImageWriteService {
         if let Some(indexed_image) = indexed_images.iter().find(|image| {
             image.image_type.eq_ignore_ascii_case(image_type) && image.image_index == image_index
         }) {
-            if image_file_stamp(Path::new(&indexed_image.local_path))
-                .await?
-                .is_some()
+            let fallback = is_fallback_image_source(&indexed_image.source);
+            if !fallback
+                && image_file_stamp(Path::new(&indexed_image.local_path))
+                    .await?
+                    .is_some()
             {
                 return Ok(true);
             }
@@ -673,6 +728,9 @@ impl ImageWriteService {
             return Ok(false);
         }
         if image_path_is_owned_by_other_type(&indexed_images, image_type, &path).await? {
+            return Ok(false);
+        }
+        if indexed_image_path_is_fallback(&indexed_images, image_type, image_index, &path).await? {
             return Ok(false);
         }
         image_file_stamp(&path).await.map(|_| true)
@@ -738,9 +796,10 @@ impl ImageWriteService {
             for image in indexed_images.iter().filter(|image| {
                 image.image_type.eq_ignore_ascii_case(image_type) && image.image_index == 0
             }) {
-                if image_file_stamp(Path::new(&image.local_path))
-                    .await?
-                    .is_some()
+                if !is_fallback_image_source(&image.source)
+                    && image_file_stamp(Path::new(&image.local_path))
+                        .await?
+                        .is_some()
                 {
                     indexed_exists = true;
                     break;
@@ -769,6 +828,13 @@ impl ImageWriteService {
                             image_index as i64,
                             &path,
                         )
+                        && !indexed_image_path_is_fallback(
+                            &indexed_images,
+                            image_type,
+                            image_index as i64,
+                            &path,
+                        )
+                        .await?
                         && !image_path_is_owned_by_other_type(&indexed_images, image_type, &path)
                             .await?
                         && image_file_stamp(&path).await?.is_some()
@@ -800,6 +866,13 @@ impl ImageWriteService {
                         image_index as i64,
                         &path,
                     )
+                    && !indexed_image_path_is_fallback(
+                        &indexed_images,
+                        image_type,
+                        image_index as i64,
+                        &path,
+                    )
+                    .await?
                     && !image_path_is_owned_by_other_type(&indexed_images, image_type, &path)
                         .await?
                     && image_file_stamp(&path).await?.is_some()
@@ -1963,6 +2036,7 @@ pub async fn write_image_atomically(target: &Path, bytes: &[u8]) -> Result<(), I
         Err(source) => return Err(image_io_error(target, source)),
     };
     let temporary = parent.join(format!(".lux-{}.image.tmp", Uuid::now_v7()));
+    register_internal_image_write(&temporary);
     let result = async {
         let mut file = OpenOptions::new()
             .write(true)
@@ -1991,6 +2065,7 @@ pub async fn write_image_atomically(target: &Path, bytes: &[u8]) -> Result<(), I
         if !unchanged {
             return Err(ImageWriteError::ConcurrentModification(target.to_owned()));
         }
+        register_internal_image_write(target);
         fs::rename(&temporary, target)
             .await
             .map_err(|source| image_io_error(target, source))?;
@@ -2001,6 +2076,7 @@ pub async fn write_image_atomically(target: &Path, bytes: &[u8]) -> Result<(), I
             .sync_all()
             .await
             .map_err(|source| image_io_error(parent, source))?;
+        finalize_internal_image_write(target, image_file_stamp(target).await.ok().flatten());
         Ok(())
     }
     .await;
@@ -2320,6 +2396,31 @@ pub fn normalize_image_type(value: &str) -> Option<&'static str> {
     }
 }
 
+pub(crate) fn is_fallback_image_source(source: &str) -> bool {
+    source.eq_ignore_ascii_case("FFMPEG")
+        || source.eq_ignore_ascii_case("FFMPEG_FALLBACK")
+        || source.eq_ignore_ascii_case("STRM_FFMPEG")
+}
+
+async fn indexed_image_path_is_fallback(
+    indexed_images: &[StoredItemImage],
+    image_type: &str,
+    image_index: i64,
+    path: &Path,
+) -> Result<bool, ImageWriteError> {
+    let comparable_path = canonical_path_for_comparison(path).await?;
+    for image in indexed_images {
+        if image.image_type.eq_ignore_ascii_case(image_type)
+            && image.image_index == image_index
+            && is_fallback_image_source(&image.source)
+            && canonical_path_for_comparison(Path::new(&image.local_path)).await? == comparable_path
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn content_type(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "jpg" | "jpeg" => Some("image/jpeg"),
@@ -2542,7 +2643,8 @@ mod tests {
         canonical_image_stems, global_image_download_permits, global_image_write_permits,
         image_attempt_failure, image_content_tag_and_dimensions_from_bytes,
         image_download_retry_delay, image_language_matches, image_lookup_stems,
-        is_allowed_scraper_image_url, retryable_image_status,
+        is_allowed_scraper_image_url, retryable_image_status, should_suppress_internal_image_write,
+        write_image_atomically,
     };
 
     #[test]
@@ -2598,6 +2700,22 @@ mod tests {
             .expect("metadata worker");
         assert_eq!(content_tag.len(), 64);
         assert_eq!(dimensions, Some((3, 2)));
+    }
+
+    #[tokio::test]
+    async fn internal_image_write_marker_is_invalidated_by_external_update() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let target = root.path().join("poster.jpg");
+
+        write_image_atomically(&target, b"internal image")
+            .await
+            .expect("internal image write");
+        assert!(should_suppress_internal_image_write(&target).await);
+
+        tokio::fs::write(&target, b"external image with a different size")
+            .await
+            .expect("external image update");
+        assert!(!should_suppress_internal_image_write(&target).await);
     }
 
     #[test]

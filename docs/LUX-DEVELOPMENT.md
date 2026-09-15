@@ -1339,7 +1339,10 @@ TMDb 插件可选启用“原语言”模式。电影和剧集的标题优先使
 只声明实际能力：
 
 - SupportsDirectPlay = true。
-- SupportsDirectStream 按首版实际播放入口实现返回 true；Transcoding 返回 false。
+- SupportsDirectStream 按首版实际播放入口实现返回 true；本地媒体在 Emby `PlaybackInfo`
+  POST 声明 `EnableTranscoding=true` 且未启用直放、或同时声明直放/转码但由 `DeviceProfile` 判断直放
+  profile 不匹配且存在 HLS 转码 profile、或携带 `forceTranscode=true` 时返回服务端转码能力；顶层布尔值
+  全部省略时也按 `DeviceProfile` 协商，`.strm` 始终返回 `SupportsTranscoding=false`。
 - MediaSources 包含版本、容器、码率、大小、时长、流列表、章节和直放 URL。
 - 每个媒体版本的章节独立返回；条目级 `Chapters` 使用默认媒体源的章节。
   `IntroStart`、`IntroEnd`、`CreditsStart` 隐藏标记映射为 Emby `ChapterInfo`。
@@ -1537,11 +1540,17 @@ BaseItemDto 至少按场景提供：
 - logout 撤销当前设备令牌。
 - 401 表示令牌缺失、无效或撤销；403 表示用户已认证但无权限。
 
+Lux 自有 `/api/v1` 的媒体、搜索、首页、图片、播放和用户状态接口除 Web session 外，接受同一用户的
+Emby AccessToken：推荐使用 `X-Lux-Token`，并兼容 `X-Emby-Token`、`X-MediaBrowser-Token` 和
+`Authorization: Bearer`。令牌仍按用户执行媒体库 ACL；显式令牌请求不依赖 Cookie CSRF。`X-Lux-Api-Key`
+和 `api_key` 查询参数保留给 LUX-182 共享管理员 API Key，不授予普通用户管理员权限。
+
 ---
 
 ## 16. Lux 自有 API
 
-Web 和管理控制台使用 /api/v1，不直接依赖 Emby DTO。
+Web 和管理控制台使用 /api/v1，不直接依赖 Emby DTO；第三方 Lux 客户端可以使用用户级客户端令牌调用
+同一份 Lux JSON 合同。
 
 ### 16.1 初始化和认证
 
@@ -1643,7 +1652,7 @@ Lux 自有列表优先使用游标分页。游标包含稳定排序键和 ID，�
 ### 17.3 管理页面
 
 - 仪表盘。
-- 媒体库列表和编辑。
+- 媒体库列表和编辑；媒体库卡片封面可单击直接打开编辑弹窗。
 - 全局策略：元数据、图像和字幕默认值，刮削模式，以及应用范围和存储预估。
 - 路径选择/输入、读写检测。
 - 扫描计划与元数据计划，明确分开。
@@ -2104,6 +2113,10 @@ services:
 | LUX-249 | docs/LUX-DEVELOPMENT.md、docs/COMPATIBILITY.md、src/application/scraper.rs、src/application/images.rs、src/application/candidates.rs、src/storage/media.rs、src/storage/repository.rs、web/src/features/admin/AdminPluginsPage.tsx、web/tests/plugin-library.test.ts；TMDb 原语言文字与图片模式 |
 | LUX-250 | docs/LUX-DEVELOPMENT.md、web/src/features/home/media.tsx、web/src/features/detail/MediaDetailPage.tsx、web/tests/home-media.test.tsx、web/tests/media-detail.test.tsx；季海报缺失时回退父剧海报 |
 | LUX-251 | docs/LUX-DEVELOPMENT.md、docs/LUX-251-PLAN.md、migrations/0120_manual_item_merges.sql、migrations-postgres/0120_manual_item_merges.sql、src/storage/media_merge.rs、src/storage/repository.rs、src/storage/mod.rs、src/storage/catalog.rs、src/application/item_merge.rs、src/application/mod.rs、src/application/scanner.rs、src/api/legacy.rs、src/api/admin.rs、src/api/admin_handlers.rs、web/src/features/library/LibraryPage.tsx、web/src/lib/api/client.ts、web/src/lib/api/types.ts、tests/item_merge.rs、web/tests/library-page.test.ts；管理员手动合并媒体条目为多版本 |
+| LUX-252 | docs/LUX-DEVELOPMENT.md、web/src/features/detail/MediaDetailPage.tsx、web/tests/media-detail.test.tsx；单季剧集详情直接展示单集列表 |
+| LUX-253 | docs/LUX-DEVELOPMENT.md、web/src/features/detail/MediaDetailPage.tsx、web/src/react.css、web/tests/media-detail.test.tsx；单集图片播放与文字详情入口 |
+| LUX-254 | docs/LUX-254-PLAN.md、src/application/playback/session.rs、src/api/playback.rs、src/api/emby.rs、src/api/legacy.rs、tests/playback.rs、docs/API.md、docs/COMPATIBILITY.md；Emby 客户端服务端转码 |
+| LUX-255 | docs/LUX-DEVELOPMENT.md、docs/API.md、docs/COMPATIBILITY.md、src/api/users.rs、src/api/admin_handlers.rs、tests/lux_api_auth.rs、tests/admin_api_key.rs；Lux 用户级客户端令牌与第三方首页 API |
 
 ### 阶段 0：仓库和工程纪律
 
@@ -3391,14 +3404,16 @@ PostgreSQL 路径改为一条 `LATERAL` 查询，每个媒体库先通过现有 
 - 不改变 TMDb Provider ID、Emby DTO 或插件 RPC 方法名称。
 - 不把 TMDb 凭据放入非敏感配置、API 响应、日志或插件 RPC。
 
-#### LUX-145：后台本地视频缩略图任务
+#### LUX-145：后台本地视频封面与缩略图回退任务
 
-范围：将外部 `ffmpegthumb` 的视频首帧缩略图行为重写为 Lux 内置后台任务。媒体库扫描成功后，任务为缺少缩略图的本地视频来源生成 JPEG 并登记到 `item_images`；只处理 `LOCAL_FILE`，不读取、不探测、不访问 `.strm` 指向的远程视频。
+范围：将外部 `ffmpegthumb` 的视频截图行为重写为 Lux 内置后台回退任务。媒体库扫描成功后，任务为缺少有效主图的本地视频来源从同一画面生成独立的竖版 `POSTER` 和横版 `THUMB` JPEG 并登记到 `item_images`；只处理 `LOCAL_FILE`，不读取、不探测、不访问 `.strm` 指向的远程视频。截图结果来源优先级低于本地图片和在线刮削器图片。
 
 验收：
 
-- [x] 本地视频在扫描完成后的后台阶段生成缩略图，默认截取 `00:03:01`，并通过 `THUMB` 图片记录提供给现有图片接口。
-- [x] 同一逻辑媒体项优先使用默认本地来源；已有缩略图不被覆盖；缺少或失效的登记路径可以重建。
+- [x] 本地视频在扫描完成后的后台阶段从默认 `00:03:01` 画面生成独立的 `POSTER`（2:3）和 `THUMB`（16:9），分别通过现有图片接口提供。
+- [x] 同一逻辑媒体项优先使用默认本地来源；已有有效本地图片和刮削器图片不被截图覆盖；缺少或失效的登记路径可以重建。
+- [x] 截图使用低优先级 `FFMPEG` 回退来源：没有选择刮削器、刮削器没有返回对应图片或截图先完成时，保留截图；刮削器后来获得对应图片时可以替换截图回退图；截图不能替换已经存在的非回退图片。
+- [x] `POSTER` 和 `THUMB` 独立判断：刮削器只返回其中一种图片时，另一种可以单独由截图补全；两种图片不共享登记路径。
 - [x] `STRM_URL` 不进入候选查询或 ffmpeg 参数；纯 `.strm` 条目不会生成缩略图。
 - [x] ffmpeg 使用参数数组、路径根目录约束、原子输出和超时控制；单个文件失败不导致扫描任务失败。
 - [x] 扫描任务事件记录缩略图阶段的完成/失败计数；容器重启取消未完成任务后，下一次扫描仍可重试缺失项。
@@ -3414,7 +3429,7 @@ PostgreSQL 路径改为一条 `LATERAL` 查询，每个媒体库先通过现有 
 
 明确不做：
 
-- 不实现独立缩略图 HTTP API、Web 配置页、转码、音频 WAV 提取、字幕抽取或 `.strm` 远程处理。
+- 不实现独立缩略图 HTTP API、Web 配置页、转码、音频 WAV 提取、字幕抽取或 `.strm` 远程处理；STRM 截图仍由 LUX-146 单独负责。
 
 ---
 
@@ -6070,6 +6085,148 @@ PostgreSQL 集成测试目标已编译，但本机没有可用 PostgreSQL 实例
 
 - 不把父剧海报复制到季目录或写入 `/config/metadata/library`。
 - 不修改 TMDb 插件、数据库 schema、Emby 图片 DTO 或图片来源优先级。
+
+#### LUX-252：单季剧集详情直接展示单集列表
+
+范围：当剧集详情实际返回的季度数量为一时，剧集详情页直接展示该季度的单集列表，避免用户
+先进入只有一个季度的季度详情页；多季剧集继续展示季度卡片，季度详情页和单集详情页保持现有行为。
+该变化仅属于 Web 展示层，不修改 API、数据库或剧集/季度/单集领域关系。
+
+验收：
+
+- [x] 单季剧集详情不再显示季度卡片，而是在剧集详情下显示该季度的单集数量和单集列表。
+- [x] 单季剧集的单集仍可进入原有单集详情页，播放入口和下一集选择逻辑不变。
+- [x] 多季剧集继续显示季度卡片，不提前展开任一季度的单集列表。
+- [x] 季度详情页仍显示原有单集列表，空季度仍显示原有空状态。
+
+验证：
+
+- `pnpm --dir web test -- media-detail.test.tsx`
+- `pnpm --dir web build`
+- `git diff --check`
+
+验证记录（2026-09-15）：`pnpm --dir web test`（105 个 Node 测试、479 个 Vitest 测试通过）、
+`pnpm --dir web build`、`git diff --check` 通过；浏览器运行时检查因本机 CUA 浏览器提供方无法加载
+request-header policy 未执行。未修改 Rust 源码、API 或数据库。
+
+依赖：LUX-060、LUX-061、LUX-100。
+
+明确不做：
+
+- 不修改 `/api/v1/items/{id}/children` 的请求或响应合同。
+- 不将单集列表改为自动播放，也不改变多季剧集的浏览层级。
+
+#### LUX-253：单集图片播放与文字详情入口
+
+范围：在季详情页的单集列表以及单集详情页的同季分集卡片中，将图片区域与文字区域拆分为两个入口。
+鼠标悬停在图片区域时显示居中的播放按钮；点击图片区域任意位置进入现有 `/watch/{itemId}` 播放页，
+点击单集标题、简介或“查看详情”文字进入现有 `/items/{itemId}` 详情页。该变化仅属于 Web 展示层，
+不修改播放会话、媒体源选择、API、数据库或单集层级关系。
+
+验收：
+
+- [x] 季详情单集列表的图片区域提供可访问的播放链接，并在桌面悬停时显示居中的播放图标。
+- [x] 季详情单集列表的标题、简介和详情文字继续进入单集详情页。
+- [x] 单集详情页的同季分集卡片保持相同的图片播放、文字详情语义。
+- [x] 前端测试覆盖两类入口的目标路径和播放按钮的可访问名称。
+
+验证：
+
+- `pnpm --dir web test`
+- `pnpm --dir web build`
+
+验证记录（2026-09-15）：`pnpm --dir web test`（105 个 Node 测试、479 个 Vitest 测试通过）、
+`pnpm --dir web build`、`git diff --check` 通过；浏览器运行时截图验证因本机 CUA 浏览器提供方无法加载
+request-header policy 未执行。未修改 Rust 源码、API 或数据库。
+
+依赖：LUX-100、LUX-231。
+
+明确不做：
+
+- 不改变 `/watch/{itemId}` 播放页及其播放会话初始化逻辑。
+- 不将电影、剧集、季度或其他媒体卡片的图片点击行为一并改为播放。
+
+#### LUX-254：Emby 客户端服务端转码
+
+范围：把现有本地媒体服务端 HLS 能力接入 Emby 兼容 `PlaybackInfo` 协商，使第三方 Emby 客户端在
+无法直放时可以使用标准 `TranscodingUrl` 播放。Emby 路由只负责解析协议请求、执行 ACL 和映射 DTO；
+FFmpeg、临时目录、并发限制、签名资源和生命周期继续由现有播放 application service 负责。
+
+兼容合同：
+
+- `GET /Items/{itemId}/PlaybackInfo` 和空 body 的 `POST` 保持现有 Direct Play 行为；带有明确
+  `EnableDirectPlay`、`EnableDirectStream`、`EnableTranscoding`、`AllowVideoStreamCopy` 和
+  `AllowAudioStreamCopy` 的 `POST` 按客户端能力从 Direct、HLS Remux、音频转码、硬件转码和软件转码中
+  选择最低成本可用档位；`EnableTranscoding=true` 且 `EnableDirectPlay` 未设置或为 `false` 时进入
+  转码。客户端同时声明直放和转码时，按 Emby `DeviceProfile.DirectPlayProfiles` 匹配本地媒体源的容器和
+  音视频 codec；直放 profile 不匹配且存在 HLS `TranscodingProfiles` 时进入转码。没有顶层布尔值时也按
+  此规则协商；HLS profile 限定 codec 时，只复制兼容的流，否则进入相应的音频或视频转码档位。
+  `forceTranscode=true` 查询参数可覆盖 `EnableDirectPlay=true`。GET 和空 body 的 POST 保持
+  Direct Play 行为。
+- 本地媒体源在选择服务端转码时返回 `SupportsTranscoding=true`、`TranscodingUrl`、
+  `TranscodingSubProtocol=hls`、`TranscodingContainer=mp4` 和 `TranscodingMimeType=video/mp4`。
+  URL 指向标准 Emby `master.m3u8` 入口；清单中的初始化片段和媒体片段继续使用当前会话的短期签名 URL。
+- 转码会话复用 `web_playback_sessions`，其 `PlaySessionId` 可被 Emby `Sessions/Playing`、`Progress` 和
+  `Stopped` 回调关联；播放/暂停刷新 TTL，停止立即回收 FFmpeg 进程和临时目录。没有回调时仍由服务端
+  过期清理回收。
+- `.strm` 无论客户端是否声明转码能力，都不返回服务端转码 URL，不启动 FFmpeg，不生成 HLS 目录，也不
+  代理媒体字节。
+- 转码资源必须绑定当前用户、条目、媒体源、会话和签名有效期；错误用户、跨条目/媒体源、篡改或过期签名、
+  路径穿越和无权限请求均拒绝。Emby token 不写入转码 URL 或日志。
+
+验收：
+
+- [x] 第三方 Emby `PlaybackInfo` POST 可以为本地媒体协商服务端转码，并实际取得 `master.m3u8`、init
+      segment 和 media segment；Direct Play 仍优先。
+- [x] Emby 转码播放事件能够刷新会话并在 `Stopped` 后回收资源；无事件会被 TTL/孤儿清理回收。
+- [x] `.strm`、无权限 source、错误用户、跨 source、过期/篡改签名和路径穿越均不会启动或泄露转码资源。
+- [x] 现有 Web 播放、Emby 直放、ACL、Range、进度和媒体代理行为不回退。
+- [ ] Rust 窄测试、全量质量门和本机架构记录通过；真实第三方客户端的首帧、seek、暂停、停止和断线行为
+      由部署后专项兼容性测试记录，不以服务端测试替代。
+
+验证：见 `docs/LUX-254-PLAN.md`；本机 `uname -m` 结果不外推 NAS/x86_64 性能或所有客户端兼容性。
+
+验证记录（2026-09-15）：`cargo build --locked`、`cargo test --locked --test playback`（3 个通过）、
+`cargo test --locked --lib playback`（45 个通过）和 `cargo fmt --all -- --check` 通过；转码集成测试使用
+fake FFmpeg 实际读取 master manifest、init 和 m4s 片段，并验证回调刷新、停止清理、ACL、签名和 `.strm`
+边界，以及 `forceTranscode` POST 查询、GET 直放、省略 `EnableDirectPlay`、标准 Enable 标志组合、
+`DeviceProfile` 和不兼容 codec 不复制的兼容行为。`cargo test --locked --all-targets` 首次运行在并发运行时因既有
+`tests/libraries_api.rs` 的 SQLite 服务不可用偶发失败，单独运行该目标通过；随后完整重跑通过。
+播放目标的 `cargo clippy --locked --test playback --all-features -- -D warnings` 通过；全量
+`cargo clippy --locked --all-targets --all-features -- -D warnings` 仍被既有
+`tests/item_merge.rs:32` 的 `clippy::too_many_arguments` 阻塞。`uname -m` 为 `arm64`。真实 FFmpeg 和
+VidHub、SenPlayer、Infuse 等第三方客户端的首帧、seek、暂停、停止及断线回收尚未在部署实例验证。
+
+依赖：LUX-198、LUX-199。
+
+明确不做：
+
+- 不实现字幕转换/烧录、DRM、多码率自适应 HLS、`.strm` 服务端转码或第三方客户端专属私有协议。
+- 不改变现有 Web 播放 DTO、Emby 内部领域模型或数据库字段；没有数据库迁移需求。
+
+#### LUX-255：Lux 用户级客户端令牌与第三方首页 API
+
+范围：让 Lux 自有 `/api/v1` 的媒体、搜索、首页、图片、播放和用户状态接口接受用户级客户端令牌，
+并使第三方客户端可以直接调用已有的 `GET /api/v1/home`。不新增令牌数据库表；复用现有 Emby
+AccessToken 的生成、哈希存储、撤销和用户解析。
+
+验收：
+
+- [x] 新增推荐请求头 `X-Lux-Token: <accessToken>`，兼容 `X-Emby-Token`、`X-MediaBrowser-Token` 和
+      `Authorization: Bearer <accessToken>`。
+- [x] 无 Web Cookie 的有效用户令牌可调用 `/api/v1/home` 及 Lux 媒体查询；响应继续按当前用户执行
+      媒体库 ACL。
+- [x] 普通用户令牌不能调用管理员接口；LUX-182 共享管理员 API Key 的权限和 CSRF 豁免边界保持不变。
+- [x] 更新 Lux API、首页合同和兼容性文档；不宣称 VidHub、SenPlayer、Infuse 等真实客户端已完成验证。
+
+验证目标：`cargo test --locked --test lux_api_auth`、`cargo test --locked --all-targets`、`rustfmt --check`
+和 `git diff --check`。本轮全量 Rust 测试为 443 passed、4 ignored、0 failed，`rustfmt --check` 与
+`git diff --check` 也通过；该证据只覆盖 Lux 服务端协议，不代表第三方客户端已经完成真实客户端验证。
+
+明确不做：
+
+- 不新增普通用户 API Key 管理页面或细粒度 token scope。
+- 不改变 Emby 路由/DTO，不把用户令牌写入 URL、日志、审计事件或普通响应。
 
 ## 26. 风险与缓解
 

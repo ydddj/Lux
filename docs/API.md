@@ -31,6 +31,20 @@ Lux 自有 API 使用 `/api/v1`，响应字段使用 camelCase。错误统一为
 
 当前阶段的 cookie 始终标记 `Secure`，部署时应使用 HTTPS；本机 HTTP 集成测试只验证协议和服务端行为，不代表浏览器会在不安全来源发送 Secure cookie。
 
+## Lux 客户端令牌
+
+需要当前用户 Web session 的 Lux 媒体、搜索、首页、图片、播放和用户状态接口，也接受用户级
+Emby AccessToken，因此第三方客户端不需要保存 Web Cookie：
+
+- `X-Lux-Token: <accessToken>`：Lux 客户端推荐使用的请求头。
+- `X-Emby-Token: <accessToken>` 或 `X-MediaBrowser-Token: <accessToken>`：兼容同一个用户令牌。
+- `Authorization: Bearer <accessToken>`：兼容 Bearer 客户端。
+
+AccessToken 通过 `POST /Users/AuthenticateByName` 获取，按用户执行媒体库 ACL 和远程访问策略；撤销
+Emby token 后上述 Lux 请求立即失效。显式携带用户令牌的请求不需要 Cookie CSRF，因为浏览器不会自动
+附带这些请求头。`X-Lux-Api-Key` 和 `api_key` 查询参数仍只表示 LUX-182 的共享管理员 API Key，不能
+用来冒充普通用户。
+
 数据库连接池的 `maxConnections` 默认值为 SQLite 8、PostgreSQL 20；可通过进程环境变量
 `LUX_DB_MAX_CONNECTIONS` 在 1-100 范围内覆盖，未设置或为空时使用默认值。管理员健康接口的
 `database.pool.maxConnections` 返回当前生效值。
@@ -72,8 +86,8 @@ Lux 自有 API 使用 `/api/v1`，响应字段使用 camelCase。错误统一为
 - `POST /api/v1/admin/libraries/{libraryId}/danmaku/match`：管理员提交 `{ "concurrency": 2, "overwrite": false }`，为已索引的本地视频创建异步弹幕匹配任务；`concurrency` 支持 0-64，0 表示不设插件级并发限制但仍受宿主资源上限约束，成功返回 202，默认不覆盖已有同名 XML。
 - `GET /api/v1/admin/danmaku/match-jobs?page=1&pageSize=50&status=FAILED`：分页查看弹幕匹配任务；详情、取消和重试分别使用 `/api/v1/admin/danmaku/match-jobs/{jobId}`、`/cancel` 和 `/retry`。
 - `GET/PATCH /api/v1/admin/settings`：读取或调整 `serverName`、兼容保留的 `resumePlayedPercent`、`resumeMinTicks`（非负）和 `mediaStrategy`。自动标记已看的个人阈值请使用 `/api/v1/auth/settings`；`resumePlayedPercent` 不再控制个人自动已看或继续观看。`serverName` 会去除首尾空格，长度限制为 1-80 个字符，不接受控制字符。媒体策略的图像开关为 `poster`、`logo`、`thumbnail`、`banner`、`disc`、`artwork`、`wallpaper`，另有元数据/图片语言、地区、默认刮削器、`metadataRefreshMode`（`FILL_MISSING` 或 `FULL_REFRESH`）、最大背景图数量、最小下载宽度、字幕默认值和 `applyScope`（`NEW_CONTENT`、`SELECTED_CONTENT`、`ALL_CONTENT`）。旧策略 JSON 缺少新增字段时默认按 `FILL_MISSING` 处理。网络代理设置通过 `networkProxyUrl` 写入，支持 `http`、`https`、`socks4`、`socks4a`、`socks5` 和 `socks5h`；传 `null` 清除。响应中的 `networkProxy` 只返回脱敏地址、是否配置认证、来源和重启提示，不返回认证信息。URL 型 `.strm` 的播放解析走 Lux 的直连请求，不经过 Lux 的全局出站代理；Lux 会把播放器 User-Agent 转发给上游。写操作需要管理员 Web session 和 CSRF，响应不包含任何插件凭据。
-- `GET/PATCH /api/v1/auth/settings`：读取或调整当前登录用户的 `playedPercent`（1-100），默认 95；写操作需要当前用户 Web session 和 CSRF。该设置只影响当前用户的自动已看阈值。
-- `GET/PATCH /api/v1/auth/library-order`：读取或调整当前登录用户的媒体库顺序；写入 `{ "libraryOrder": ["<libraryId>", ...] }`，只接受当前用户可访问的媒体库 ID，未提交的可访问媒体库稳定追加到末尾；写操作需要当前用户 Web session 和 CSRF。该顺序同时用于 Lux Web 和 Emby `Views`、虚拟根目录、`VirtualFolders` 及 `OrderedViews`。
+- `GET/PATCH /api/v1/auth/settings`：读取或调整当前登录用户的 `playedPercent`（1-100），默认 95；写操作需要当前用户 Web session 和 CSRF，或用户级客户端令牌。该设置只影响当前用户的自动已看阈值。
+- `GET/PATCH /api/v1/auth/library-order`：读取或调整当前登录用户的媒体库顺序；写入 `{ "libraryOrder": ["<libraryId>", ...] }`，只接受当前用户可访问的媒体库 ID，未提交的可访问媒体库稳定追加到末尾；写操作需要当前用户 Web session 和 CSRF，或用户级客户端令牌。该顺序同时用于 Lux Web 和 Emby `Views`、虚拟根目录、`VirtualFolders` 及 `OrderedViews`。
 - 弹幕插件 `org.lux.danmaku` 的配置通过通用 `PUT /api/v1/admin/plugins/{pluginId}/config` 保存；除 `providerBaseUrl` 外还支持 `concurrency`（0-64，默认 2；0 表示不设插件级限制）和 `overwrite`（默认 `false`，勾选后每次运行覆盖已有同名 XML）；`providerBaseUrl` 只在插件配置响应中以脱敏值展示，主设置页不再保存弹幕配置。
 - `POST /api/v1/admin/settings/network-proxy/test`：管理员检测当前输入或已生效的网络代理；服务端只请求百度、Google 和 Cloudflare 三个固定目标，返回逐站延迟/HTTP 状态、网络出口 IP 和 Cloudflare 返回的两位国家/地区代码。具体 provider 的连通性由其插件自身的健康状态负责。需要管理员 Web session 和 CSRF；认证信息不会出现在响应或日志中。
 - `GET /api/v1/admin/health`：返回管理员可见的运行诊断，包括 schema、SQLite WAL 与实际写探针结果（`database.status`、`database.writable`）、连接池当前快照（`database.pool.maxConnections`、`size`、`idle`、`inUse`、`saturated`）、配置目录实际写入能力、ffprobe、媒体库根路径和后台任务计数；同时返回 `runtime.seconds`、`resources.cpu`、`resources.memory` 和 `resources.mediaStorage`。具体 metadata provider 不在主程序健康响应中探测，插件状态请通过插件管理接口查看。CPU/内存只读取 Lux 容器 cgroup，`mediaStorage` 只读取容器内 `/media` 挂载点的文件系统容量；不回退到宿主机整体资源，不返回本地配置路径或密钥。CPU 返回 `usageCores`、`capacityCores` 和按该容量归一化到 0-100 的 `usagePercent`；有 cgroup 配额时容量为配额核数，没有配额时容量为进程可见的 CPU 核数。`limitCores` 保留为实际 cgroup 配额字段，没有配额时为 `null`。指标不可用时 `available` 为 `false`，数值字段为 `null`。写入能力失败时整体 `status` 为 `degraded`，但仍返回可诊断的安全状态。
@@ -120,7 +134,7 @@ Lux 自有 API 使用 `/api/v1`，响应字段使用 camelCase。错误统一为
 
 - `GET /api/v1/admin/metadata/pending?page=1&pageSize=50`：兼容接口，管理员分页查看 pending 候选；页大小限制为 1-100。Web 控制台不再提供独立元数据纠错页面，实际处理入口是媒体库的 `metadataStatus=PENDING` 筛选和媒体详情页。
 - `GET /api/v1/admin/items/{itemId}/identify/candidates?q=关键词&page=1&pageSize=50`：管理员按 provider ID 或候选 JSON 搜索指定条目的 pending 元数据匹配候选，并返回 `fieldDiffs` 预览。
-- `POST /api/v1/admin/items/{itemId}/identify/candidates`：管理员发送 `{ "query": "标题", "year": 2020 }`，通过条目所属媒体库的 `scraperId` 搜索元数据匹配候选；候选的 provider ID 必须来自当前选中的刮削器，最多写入 20 个带 24 小时过期时间的 pending 候选，并返回当前条目的候选页。需要 `X-CSRF-Token`；刮削器不可用或请求失败不会改变本地条目。
+- `POST /api/v1/admin/items/{itemId}/identify/candidates`：管理员发送 `{ "query": "标题", "year": 2020 }`，按条目所属媒体库的刮削器顺序搜索元数据匹配候选；`PRIMARY` 成功返回候选后停止，搜索失败或无候选时继续尝试 `BACKUP`/`BOTH`，`SUPPLEMENT` 不参与身份搜索。候选的 provider ID 必须来自实际成功的刮削器，最多写入 20 个带 24 小时过期时间的 pending 候选，并返回当前条目的候选页。需要 `X-CSRF-Token`；所有刮削器不可用或请求失败不会改变本地条目。
 - `POST /api/v1/admin/items/{itemId}/identify/candidates/{candidateId}/select`：管理员选择元数据匹配候选并发送 `{ "mode": "fillMissing" }` 或 `{ "mode": "refreshUnlocked" }`，需要 `X-CSRF-Token`。前者只补空元数据字段和缺失图片，后者刷新未锁定字段和图片；候选中的每类图片只使用第一张，所属媒体库未启用的类型不写回，找不到的类型跳过；NFO/图片写回全部成功后才返回 `ONLINE_CONFIRMED`，失败返回可重试错误且候选保持 pending。
 - `POST /api/v1/admin/metadata/reidentify`：管理员发送 `{ "itemIds": ["..."] }` 创建指定条目的候选搜索任务；条目去重后限制为 1-100 个，任务持久化为 `QUEUED/RUNNING/COMPLETED/FAILED`，需要 `X-CSRF-Token`。任务使用条目所属媒体库的刮削器获取对应 provider ID；路径中的 `reidentify` 为兼容标识，不自动确认候选。
 - `GET /api/v1/admin/metadata/reidentify?page=1&pageSize=50&status=RUNNING`：管理员分页查看元数据匹配和元数据刷新任务；支持 `QUEUED`、`RUNNING`、`COMPLETED`、`FAILED`、`CANCELLED` 过滤，返回模式、`jobScope`、媒体库身份、进度和稳定错误代码；摘要只聚合当前页任务。
@@ -163,17 +177,17 @@ Lux 提供一个服务器级共享管理员 API Key，行为与 Emby API Key 兼
 
 ## 电影查询（LUX-034）
 
-Lux 电影查询要求有效 Web session：
+Lux 电影查询要求有效 Web session 或用户级客户端令牌：
 
 - `GET /api/v1/libraries`：返回已启用媒体库的基本信息，不暴露服务器路径。
 - `GET /api/v1/libraries/{libraryId}/items?page=1&pageSize=50`：按稳定标题顺序分页返回条目；支持 `itemType`、`year`、`isPlayed`、`isFavorite`、`metadataStatus=PENDING`、`sortBy=Name|DateCreated|PremiereDate|CommunityRating` 和 `sortOrder=Ascending|Descending`（同时兼容下划线参数名），筛选、排序和分页在 SQLite 查询中完成；发行日期排序优先使用完整 `premiere_date`，缺少发行日期时回退到 `production_year`，两者都缺少的条目稳定排在最后；评分排序将无评分条目稳定放在有评分条目之后。`metadataStatus=PENDING` 返回仍有待确认候选的条目。
 - `GET /api/v1/favorites?page=1&pageSize=50`：返回当前用户跨可见媒体库的收藏条目，按最近添加倒序分页；服务端执行用户状态和媒体库 ACL。
 - `GET /api/v1/search?q=关键词&page=1&pageSize=50`：搜索标题、原标题和别名，结果执行媒体库 ACL。
-- `GET /api/v1/home`：返回当前用户继续观看、推荐和可见媒体库入口；每个媒体库入口包含最多 12 条该库最新资源，按 `media_items.added_at` 倒序。所有内容均执行媒体库 ACL；响应中的 `recentlyAdded` 字段保留用于旧客户端兼容，Lux Web 首页按媒体库分别展示最新资源。
+- `GET /api/v1/home`：返回当前用户继续观看、推荐和可见媒体库入口；每个媒体库入口包含最多 12 条该库最新资源，按 `media_items.added_at` 倒序。该接口可由 Lux Web 或携带用户级客户端令牌的第三方客户端调用。所有内容均执行媒体库 ACL；响应中的 `recentlyAdded` 字段保留用于旧客户端兼容，Lux Web 首页按媒体库分别展示最新资源。
 - `GET /api/v1/items/{itemId}/playback`：读取当前 Web 用户的播放位置、已看、收藏状态，以及该条目的活动播放状态（`state`、`isPaused`、`lastEventAt`）。
-- `POST /api/v1/items/{itemId}/progress`：写入播放事件，需要当前 Web session 和 CSRF。请求体为 `{ "positionTicks": 1200000000, "durationTicks": 7200000000, "state": "PLAYING" }`；`state` 可为 `PLAYING`、`PAUSED` 或 `STOPPED`，省略时兼容为 `PLAYING`。
-- `PUT /api/v1/items/{itemId}/favorite`：设置当前 Web 用户的收藏状态，需要当前 Web session 和 CSRF。
-- `PUT /api/v1/items/{itemId}/played`：设置当前 Web 用户的已看状态，请求体为 `{ "played": true }`，需要当前 Web session 和 CSRF。
+- `POST /api/v1/items/{itemId}/progress`：写入播放事件，需要当前 Web session 和 CSRF，或用户级客户端令牌。请求体为 `{ "positionTicks": 1200000000, "durationTicks": 7200000000, "state": "PLAYING" }`；`state` 可为 `PLAYING`、`PAUSED` 或 `STOPPED`，省略时兼容为 `PLAYING`。
+- `PUT /api/v1/items/{itemId}/favorite`：设置当前 Web 用户的收藏状态，需要当前 Web session 和 CSRF，或用户级客户端令牌。
+- `PUT /api/v1/items/{itemId}/played`：设置当前 Web 用户的已看状态，请求体为 `{ "played": true }`，需要当前 Web session 和 CSRF，或用户级客户端令牌。
 - `GET /api/v1/items/{itemId}`：返回电影详情、媒体源和已探测轨道。
 - `GET /api/v1/items/{itemId}`：返回媒体详情、媒体源和已探测轨道；若已完成在线刮削，还返回 `rating`（0-10）、`ratingSource`、`premiereDate`、`lastAirDate`、`status`、`originalLanguage`、`providerIds`、`seasonCount` 和 `episodeCount`。剧集统计字段使用当前可见且未移除的季度/单集计算。
 - `GET /api/v1/items/{itemId}/children?itemType=SEASON|EPISODE&seasonId=...`：Web 同源读取剧集季度/单集或合集成员，结果执行当前用户 ACL。媒体条目响应同时返回 `parentId`、`seriesId`、`parentIndexNumber`（季号）和 `indexNumber`（集号），用于保持剧集层级导航。
@@ -208,15 +222,16 @@ Emby 目录查询要求有效 `X-Emby-Token` 或 `api_key`：
 - `GET /Users/{userId}/Items/Resume`：按用户播放位置、已看状态和服务器 Resume 阈值返回继续观看列表。
 - `GET /Users/{userId}/Items/Latest`：按最近添加顺序返回当前用户可见媒体；`GroupItems` 默认开启，根目录或媒体库范围内默认只返回电影/剧集根条目，剧集/季度结果按剧集聚合并返回 `ChildCount`，传 `GroupItems=false` 可通过 `ParentId` 获取剧集单集。
 - `GET /Search/Hints?SearchTerm=关键词&StartIndex=0&Limit=50`：返回 Emby 搜索提示，结果执行当前用户 ACL。
-- `GET|HEAD /api/v1/items/{itemId}/subtitles/{streamIndex}`：读取指定外挂字幕流；需要 Web session，并执行媒体库 ACL。
-- `GET|HEAD /api/v1/items/{itemId}/stream`：读取默认本地媒体源；可通过 `sourceId` 选择媒体源，需要 Web session 和媒体库 ACL。
+- `GET|HEAD /api/v1/items/{itemId}/subtitles/{streamIndex}`：读取指定外挂字幕流；需要 Web session 或用户级客户端令牌，并执行媒体库 ACL。
+- `GET|HEAD /api/v1/items/{itemId}/stream`：读取默认本地媒体源；可通过 `sourceId` 选择媒体源，需要 Web session 或用户级客户端令牌和媒体库 ACL。
 - `GET|HEAD /Videos/{itemId}/{mediaSourceId}/Subtitles/{streamIndex}/Stream`：按指定媒体源读取外挂字幕。
 - `GET|HEAD /Items/{itemId}/Subtitles/{streamIndex}/Stream`：按条目读取默认媒体源的外挂字幕。
 - `GET|HEAD /Videos/{itemId}/stream`、`/Videos/{itemId}/stream.{container}`：读取默认媒体源；同时接受客户端常用的小写 `/videos` 变体。
 - `GET|HEAD /Videos/{itemId}/{mediaSourceId}/stream`、`/stream.{container}`：读取指定媒体源；本地源返回文件流，HTTP `.strm` 源由 Lux 使用入站播放器 User-Agent、`Range: bytes=0-0` 请求原始地址并有限跟随重定向，最后返回 `307 Location`。若首个响应已经是媒体 `200/206`，Location 保持原始地址；如果上游返回 302，则 Location 为最终 CDN 地址。Lux 不代理媒体字节；路径型/其他 `.strm` 源按解析器结果返回 `307 Location`。
 - `GET|HEAD /Items/{itemId}/Download`：需要 `can_download` 和媒体库 ACL，返回所选单个媒体源的附件下载流；不打包同目录旁车文件。`mediaSourceId` 可选择源，`LOCAL_FILE` 直接读取库内文件，`STRM_URL` 读取 `.strm` 的首个非空 URL 后由 Lux 流式转发远程资源。
-- `GET|HEAD /api/v1/items/{itemId}/download`：Lux 下载端点，需要 Web session、`can_download` 和媒体库 ACL；返回所选单个媒体源，不打包 ZIP。`sourceId` 可选择源；本地源直接流式读取，`.strm` 读取首个非空远程 URL 并由 Lux 请求、流式转发该资源，不返回 `.strm` 文本。
-- `GET|POST /Items/{itemId}/PlaybackInfo`：返回可访问媒体源、媒体流、DirectPlay 能力和服务端生成的 `PlaySessionId`；支持 `MediaSourceId` 显式选择，支持 DirectPlay/DirectStream，不声明转码。每个媒体源可带 `Edition`/`Quality` 版本标签。
+- `GET|HEAD /api/v1/items/{itemId}/download`：Lux 下载端点，需要 Web session 或用户级客户端令牌、`can_download` 和媒体库 ACL；返回所选单个媒体源，不打包 ZIP。`sourceId` 可选择源；本地源直接流式读取，`.strm` 读取首个非空远程 URL 并由 Lux 请求、流式转发该资源，不返回 `.strm` 文本。
+- `GET|POST /Items/{itemId}/PlaybackInfo`：返回可访问媒体源、媒体流、DirectPlay 能力和服务端生成的 `PlaySessionId`；支持 `MediaSourceId` 显式选择，支持 DirectPlay/DirectStream。GET 或空 body 的 POST 保持 Direct Play 行为；带 `EnableDirectPlay`、`EnableDirectStream`、`EnableTranscoding`、`AllowVideoStreamCopy` 和 `AllowAudioStreamCopy` 的 POST 会为选中的本地媒体源按最低成本选择服务端 HLS Remux、音频转码、硬件转码或软件转码。客户端也可按 Emby 标准在 `DeviceProfile.DirectPlayProfiles` 与 `DeviceProfile.TranscodingProfiles` 中声明能力；当客户端允许转码且直放 profile 不匹配、同时声明 HLS 转码 profile 时，Lux 会选择服务端转码；顶层布尔值全部省略时也按此规则协商。若 HLS profile 限定视频或音频 codec，Lux 只复制兼容的流，否则升级到视频或音频转码档位。`EnableTranscoding=true` 且 `EnableDirectPlay` 未设置或为 `false` 时直接进入转码；若两者都为 `true`，则在 `DeviceProfile` 直放 profile 不匹配且 HLS 转码可用时进入转码。POST 查询参数 `forceTranscode=true` 可覆盖 `EnableDirectPlay=true`。转码响应返回 `SupportsTranscoding`、`TranscodingUrl`、`TranscodingSubProtocol=hls`、`TranscodingContainer=mp4` 和 `TranscodingMimeType=video/mp4`。每个媒体源可带 `Edition`/`Quality` 版本标签；`.strm` 始终不声明服务端转码。
+- `GET|HEAD /Videos/{itemId}/master.m3u8`：读取 `PlaybackInfo` 返回的签名 Emby HLS 清单；清单中的 `/Videos/{itemId}/transcoding/{sessionId}/{asset}` 地址读取签名的 `init.mp4` 或 `.m4s` 片段。两类资源不要求 Web Cookie，仍绑定用户、条目、媒体源、转码会话和过期签名；也接受 `/emby`、小写 `/videos` 兼容前缀。
 - 本地媒体源的 `MediaSources.Container` 使用实际文件扩展名（例如 `mkv`、`mp4`），不暴露 ffprobe 的复合 `format_name`。`DirectStreamUrl` 通过 `MediaSourceId` 定位源；`stream.{container}` 的后缀仅作兼容性后缀，服务端仍按媒体源记录读取文件。
 - `.strm` 条目的 `Path` 和 `MediaSources.Path` 均返回旁车记录中的原始媒体目标，供外部 Emby 代理执行路径映射或 302 解析；`MediaStreams` 除基础轨道字段外，还返回旁车中的分辨率、画面比例、码率、色深、帧率、Profile、像素格式、声道布局和采样率等已验证字段。
 - `MediaStreams` 不返回 Matroska/MP4 中标记为 `attached_pic` 的封面附加图轨，避免客户端将封面误认为可播放视频轨。
@@ -225,7 +240,7 @@ Emby 目录查询要求有效 `X-Emby-Token` 或 `api_key`：
 `.strm` 媒体源在 PlaybackInfo 中以 `Protocol=File`、`IsRemote=false` 返回；条目的 `Path` 和 `MediaSources.Path` 保留原始目标。对 HTTP(S) 和本地路径型 `.strm`，`MediaSources[].DirectStreamUrl` 使用当前服务的标准 `/Videos/{数字ItemId}/stream[.Container]?MediaSourceId=...` 入口并附带短期 Lux 播放票据，同时携带标准 `UserId` 作为外部代理的身份关联提示；`UserId` 不承担授权。为兼容所有可能丢失独立媒体请求鉴权的第三方播放器，Lux 会仅对 URL/路径型 `.strm` 将本次标准 Emby token 作为 `api_key` 写入同一签名 URL，并将 `AddApiKeyToDirectStreamUrl` 设为 `true`；本地文件和 SMB/FTP 解析源不写入长期 token。Lux 仍要求短期票据。外部 Emby 代理从原始 `Path` 提取映射信息并执行 302 解析，客户端不会直接连接 `.strm` 中可能存在的内网 302 地址。播放器直接访问 Lux 入口时，URL 型 `.strm` 由 Lux 使用播放器 User-Agent 请求上游并有限返回 307，路径型 `.strm` 按本地文件规则处理；Lux 不代理媒体字节，PlaybackInfo 本身不访问上游。具有媒体库访问权限的客户端仍可能获得包含令牌的原始 `Path`，因此含 token 的兼容 URL 和原始目标都应避免进入公开日志。
 
 - `GET /Sessions`：返回当前用户的活动播放会话；管理员可查看全部活动会话。每个会话按 Emby 兼容字段返回 `Client`、`DeviceName`、`DeviceId`、`DeviceType`、`ApplicationVersion` 和 `RemoteEndPoint`；无法获得的值为 `null`。
-- `POST /Sessions/Playing`、`/Sessions/Playing/Progress`、`/Sessions/Playing/Stopped`：幂等记录播放事件，并将位置单调写入用户状态；事件体中的设备/客户端字段优先，缺失时从上述认证头回填。
+- `POST /Sessions/Playing`、`/Sessions/Playing/Progress`、`/Sessions/Playing/Stopped`：幂等记录播放事件，并将位置单调写入用户状态；事件体中的设备/客户端字段优先，缺失时从上述认证头回填。由 `PlaybackInfo` 返回的 `lux-emby:` `PlaySessionId` 会同时刷新对应服务端 HLS 会话，`Stopped` 立即回收 FFmpeg 进程和临时目录。
 - `GET /api/v1/items/{itemId}/playback`：读取当前 Web 用户的播放状态和该条目的活动会话状态。
 - `POST /api/v1/items/{itemId}/progress`：写入当前 Web 用户的播放开始、进度、暂停或停止事件；与 Emby 播放事件共用 `playback_sessions` 和 `user_item_state`。
 - `PUT /api/v1/items/{itemId}/favorite`：按请求体 `{ "favorite": true }` 设置当前 Web 用户的收藏状态。
@@ -241,8 +256,9 @@ Emby 目录查询要求有效 `X-Emby-Token` 或 `api_key`：
 
 ## Web 播放会话（LUX-198）
 
-Web 播放使用独立于 Emby 的播放会话 API。创建和状态写入接口要求当前 Web session；除创建接口返回的
-计划外，媒体资源使用短期 HMAC 签名 URL，因此 `<video>`、HLS.js 或 Safari 请求资源时不需要携带 Lux Cookie。
+Web 播放使用独立于 Emby 的播放会话 API。创建和状态写入接口要求当前 Web session 或用户级客户端令牌；
+使用 Web session 的写请求仍需 CSRF。除创建接口返回的计划外，媒体资源使用短期 HMAC 签名 URL，因此
+`<video>`、HLS.js 或 Safari 请求资源时不需要携带 Lux Cookie。
 签名只绑定当前会话、资源名称和过期时间，不能被改用于其他会话、媒体源或路径。
 
 - `POST /api/v1/playback/sessions`：创建一次播放计划。请求体为

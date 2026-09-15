@@ -1,14 +1,22 @@
 use super::*;
 
+use crate::application::playback::session::CreatedWebPlaybackSession;
 use crate::storage::MAX_PLAYBACK_SESSION_WINDOW_SECONDS;
 
 pub(super) async fn emby_playback_info(
     headers: HeaderMap,
+    method: Method,
     Path(item_id): Path<String>,
     raw_query: RawQuery,
     State(state): State<AppState>,
+    body: Bytes,
 ) -> Response {
+    let force_transcode = method == Method::POST && emby_force_transcode_from_raw(&raw_query);
     let query = emby_stream_query_from_raw(raw_query);
+    let request = match parse_emby_playback_info_request(&body) {
+        Ok(request) => request,
+        Err(status) => return status.into_response(),
+    };
     let standard_api_key =
         standard_emby_playback_api_key(&headers, query.api_key.as_deref(), &state).await;
     let user = match require_emby_user(&headers, &state, query.api_key.as_deref()).await {
@@ -29,6 +37,7 @@ pub(super) async fn emby_playback_info(
         }
     };
     let mut sources = item.media_sources.iter().collect::<Vec<_>>();
+    let query_media_source_requested = query.media_source_id.is_some();
     sources.sort_by(|left, right| {
         right
             .is_default
@@ -41,6 +50,40 @@ pub(super) async fn emby_playback_info(
         };
         let source = sources.remove(index);
         sources.insert(0, source);
+    }
+    if let Some(source_id) = request.media_source_id.as_deref() {
+        let Some(index) = sources.iter().position(|source| source.id == source_id) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let source = sources.remove(index);
+        sources.insert(0, source);
+    }
+    let transcode_requested = method == Method::POST
+        && sources.first().is_some_and(|source| {
+            request.requests_server_transcoding_for_source(force_transcode, source)
+        });
+    if let Some(source) = sources.first() {
+        tracing::info!(
+            event = "emby_playback_negotiation",
+            item_id_prefix = %playback_identifier_prefix(&item.id),
+            source_id_prefix = %playback_identifier_prefix(&source.id),
+            source_kind = %source.source_kind,
+            query_media_source_requested,
+            body_media_source_requested = request.media_source_id.is_some(),
+            enable_direct_play = ?request.enable_direct_play,
+            enable_direct_stream = ?request.enable_direct_stream,
+            enable_transcoding = ?request.enable_transcoding,
+            allow_video_stream_copy = ?request.allow_video_stream_copy,
+            allow_audio_stream_copy = ?request.allow_audio_stream_copy,
+            device_profile_present = request.device_profile.is_some(),
+            device_profile_hls = request
+                .device_profile
+                .as_ref()
+                .is_some_and(EmbyDeviceProfile::supports_lux_hls),
+            force_transcode,
+            transcode_requested,
+            "negotiated Emby playback source"
+        );
     }
     let strm_resolver_available = if sources
         .iter()
@@ -56,8 +99,23 @@ pub(super) async fn emby_playback_info(
     } else {
         false
     };
+    let transcode_session = if transcode_requested {
+        let Some(source) = sources.first() else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        match create_emby_transcoding_session(&state, &user, &item.id, source, &request).await {
+            Ok(session) => session,
+            Err(status) => return status.into_response(),
+        }
+    } else {
+        None
+    };
+    let play_session_id = transcode_session
+        .as_ref()
+        .map(|session| session.play_session_id.clone())
+        .unwrap_or_else(|| Uuid::now_v7().to_string());
     Json(json!({
-        "PlaySessionId": Uuid::now_v7().to_string(),
+        "PlaySessionId": play_session_id,
         "MediaSources": sources
             .into_iter()
             .map(|source| {
@@ -67,6 +125,15 @@ pub(super) async fn emby_playback_info(
                     true,
                     strm_resolver_available,
                 );
+                if (request.enable_transcoding == Some(true) || force_transcode)
+                    && source.source_kind == "LOCAL_FILE"
+                    && let Value::Object(object) = &mut value
+                {
+                    // Advertise the local source capability even when this
+                    // request still resolves to direct play. Clients can
+                    // then retry with their transcoding-only capabilities.
+                    object.insert("SupportsTranscoding".to_owned(), json!(true));
+                }
                 let has_direct_stream_url = value
                     .get("DirectStreamUrl")
                     .is_some_and(Value::is_string);
@@ -96,12 +163,339 @@ pub(super) async fn emby_playback_info(
                         "AddApiKeyToDirectStreamUrl".to_owned(),
                         json!(emby_source_needs_proxy_identity(source)),
                     );
+                    if transcode_session
+                        .as_ref()
+                        .is_some_and(|session| session.media_source_id == source.id)
+                        && let Some(session) = transcode_session.as_ref()
+                        && let Some(service) = state.web_playback.as_ref()
+                        && let Some(url) = emby_transcoding_url(
+                            service,
+                            &item.id,
+                            source,
+                            session,
+                        )
+                    {
+                        object.insert("SupportsTranscoding".to_owned(), json!(true));
+                        object.insert("TranscodingUrl".to_owned(), json!(url));
+                        object.insert("TranscodingSubProtocol".to_owned(), json!("hls"));
+                        object.insert("TranscodingContainer".to_owned(), json!("mp4"));
+                        object.insert("TranscodingMimeType".to_owned(), json!("video/mp4"));
+                    }
                 }
                 value
             })
             .collect::<Vec<_>>(),
     }))
     .into_response()
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EmbyPlaybackInfoRequest {
+    #[serde(
+        rename = "MediaSourceId",
+        alias = "mediaSourceId",
+        alias = "media_source_id"
+    )]
+    media_source_id: Option<String>,
+    #[serde(rename = "EnableDirectPlay", alias = "enableDirectPlay")]
+    enable_direct_play: Option<bool>,
+    #[serde(rename = "EnableDirectStream", alias = "enableDirectStream")]
+    enable_direct_stream: Option<bool>,
+    #[serde(rename = "EnableTranscoding", alias = "enableTranscoding")]
+    enable_transcoding: Option<bool>,
+    #[serde(rename = "AllowVideoStreamCopy", alias = "allowVideoStreamCopy")]
+    allow_video_stream_copy: Option<bool>,
+    #[serde(rename = "AllowAudioStreamCopy", alias = "allowAudioStreamCopy")]
+    allow_audio_stream_copy: Option<bool>,
+    #[serde(rename = "DeviceProfile", alias = "deviceProfile")]
+    device_profile: Option<EmbyDeviceProfile>,
+}
+
+impl EmbyPlaybackInfoRequest {
+    fn requests_server_transcoding(&self, force_transcode: bool) -> bool {
+        force_transcode
+            || (self.enable_transcoding == Some(true) && self.enable_direct_play != Some(true))
+    }
+
+    fn requests_server_transcoding_for_source(
+        &self,
+        force_transcode: bool,
+        source: &crate::application::catalog::CatalogSource,
+    ) -> bool {
+        if self.device_profile.is_none() {
+            return self.requests_server_transcoding(force_transcode);
+        }
+        if force_transcode {
+            return true;
+        }
+        if self.enable_transcoding == Some(true) {
+            if self.enable_direct_play != Some(true) {
+                return true;
+            }
+            return self.device_profile.as_ref().is_some_and(|profile| {
+                profile.supports_lux_hls() && !profile.supports_direct_play(source)
+            });
+        }
+        if self.force_explicitly_selects_a_plan() {
+            return false;
+        }
+        self.device_profile.as_ref().is_some_and(|profile| {
+            profile.supports_lux_hls() && !profile.supports_direct_play(source)
+        })
+    }
+
+    fn force_explicitly_selects_a_plan(&self) -> bool {
+        self.enable_direct_play.is_some() || self.enable_transcoding.is_some()
+    }
+
+    fn playback_capabilities_for_source(
+        &self,
+        source: Option<&crate::application::catalog::CatalogSource>,
+    ) -> PlaybackCapabilities {
+        let direct_stream = self.enable_direct_stream == Some(true);
+        let (video_copy_allowed, audio_copy_allowed) = self
+            .device_profile
+            .as_ref()
+            .zip(source)
+            .map(|(profile, source)| {
+                (
+                    profile.supports_hls_video_copy(source),
+                    profile.supports_hls_audio_copy(source),
+                )
+            })
+            .unwrap_or((true, true));
+        PlaybackCapabilities {
+            direct_play: false,
+            hls: true,
+            video_copy_to_fmp4: direct_stream
+                && self.allow_video_stream_copy == Some(true)
+                && video_copy_allowed,
+            audio_copy_to_fmp4: direct_stream
+                && self.allow_audio_stream_copy == Some(true)
+                && audio_copy_allowed,
+            hardware_transcode: true,
+            software_transcode: true,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EmbyDeviceProfile {
+    #[serde(default, rename = "DirectPlayProfiles", alias = "directPlayProfiles")]
+    direct_play_profiles: Vec<EmbyPlaybackProfile>,
+    #[serde(default, rename = "TranscodingProfiles", alias = "transcodingProfiles")]
+    transcoding_profiles: Vec<EmbyPlaybackProfile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EmbyPlaybackProfile {
+    #[serde(rename = "Container", alias = "container")]
+    container: Option<String>,
+    #[serde(rename = "VideoCodec", alias = "videoCodec")]
+    video_codec: Option<String>,
+    #[serde(rename = "AudioCodec", alias = "audioCodec")]
+    audio_codec: Option<String>,
+    #[serde(rename = "Protocol", alias = "protocol")]
+    protocol: Option<String>,
+    #[serde(rename = "Type", alias = "type")]
+    profile_type: Option<String>,
+}
+
+impl EmbyDeviceProfile {
+    fn supports_lux_hls(&self) -> bool {
+        self.transcoding_profiles.iter().any(|profile| {
+            is_video_profile(profile.profile_type.as_deref()) && is_hls_profile(profile)
+        })
+    }
+
+    fn supports_direct_play(&self, source: &crate::application::catalog::CatalogSource) -> bool {
+        let video_codec = source
+            .streams
+            .iter()
+            .find(|stream| stream.stream_type.eq_ignore_ascii_case("VIDEO"))
+            .and_then(|stream| stream.codec.as_deref());
+        let audio_codec = source
+            .streams
+            .iter()
+            .find(|stream| stream.stream_type.eq_ignore_ascii_case("AUDIO"))
+            .and_then(|stream| stream.codec.as_deref());
+        self.direct_play_profiles.iter().any(|profile| {
+            is_video_profile(profile.profile_type.as_deref())
+                && profile_value_matches(profile.container.as_deref(), source.container.as_deref())
+                && codec_value_matches(profile.video_codec.as_deref(), video_codec)
+                && codec_value_matches(profile.audio_codec.as_deref(), audio_codec)
+        })
+    }
+
+    fn supports_hls_video_copy(&self, source: &crate::application::catalog::CatalogSource) -> bool {
+        let video_codec = source
+            .streams
+            .iter()
+            .find(|stream| stream.stream_type.eq_ignore_ascii_case("VIDEO"))
+            .and_then(|stream| stream.codec.as_deref());
+        self.transcoding_profiles.iter().any(|profile| {
+            is_video_profile(profile.profile_type.as_deref())
+                && is_hls_profile(profile)
+                && codec_value_matches(profile.video_codec.as_deref(), video_codec)
+        })
+    }
+
+    fn supports_hls_audio_copy(&self, source: &crate::application::catalog::CatalogSource) -> bool {
+        let audio_codec = source
+            .streams
+            .iter()
+            .find(|stream| stream.stream_type.eq_ignore_ascii_case("AUDIO"))
+            .and_then(|stream| stream.codec.as_deref());
+        self.transcoding_profiles.iter().any(|profile| {
+            is_video_profile(profile.profile_type.as_deref())
+                && is_hls_profile(profile)
+                && codec_value_matches(profile.audio_codec.as_deref(), audio_codec)
+        })
+    }
+}
+
+fn is_hls_profile(profile: &EmbyPlaybackProfile) -> bool {
+    profile
+        .protocol
+        .as_deref()
+        .is_some_and(|protocol| protocol.eq_ignore_ascii_case("hls"))
+}
+
+fn is_video_profile(profile_type: Option<&str>) -> bool {
+    profile_type.is_none_or(|value| {
+        let value = value.trim();
+        value.is_empty() || value.eq_ignore_ascii_case("video")
+    })
+}
+
+fn profile_value_matches(profile_value: Option<&str>, actual_value: Option<&str>) -> bool {
+    let Some(profile_value) = profile_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+    actual_value.is_some_and(|actual_value| {
+        profile_value
+            .split(',')
+            .any(|candidate| candidate.trim().eq_ignore_ascii_case(actual_value.trim()))
+    })
+}
+
+fn codec_value_matches(profile_value: Option<&str>, actual_value: Option<&str>) -> bool {
+    let Some(profile_value) = profile_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+    let Some(actual_value) = actual_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    profile_value
+        .split(',')
+        .any(|candidate| normalize_emby_codec(candidate) == normalize_emby_codec(actual_value))
+}
+
+fn normalize_emby_codec(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "avc" => "h264".to_owned(),
+        "h265" => "hevc".to_owned(),
+        "mp4a" => "aac".to_owned(),
+        value => value.to_owned(),
+    }
+}
+
+fn parse_emby_playback_info_request(body: &Bytes) -> Result<EmbyPlaybackInfoRequest, StatusCode> {
+    if body.is_empty() || body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(EmbyPlaybackInfoRequest::default());
+    }
+    serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+fn emby_force_transcode_from_raw(raw_query: &RawQuery) -> bool {
+    raw_query.0.as_deref().is_some_and(|raw_query| {
+        url::form_urlencoded::parse(raw_query.as_bytes()).any(|(name, value)| {
+            name.eq_ignore_ascii_case("forceTranscode")
+                && (value == "1" || value.eq_ignore_ascii_case("true"))
+        })
+    })
+}
+
+async fn create_emby_transcoding_session(
+    state: &AppState,
+    user: &UserRecord,
+    item_id: &str,
+    source: &crate::application::catalog::CatalogSource,
+    request: &EmbyPlaybackInfoRequest,
+) -> Result<Option<CreatedWebPlaybackSession>, StatusCode> {
+    if source.source_kind != "LOCAL_FILE" {
+        return Ok(None);
+    }
+    let Some(service) = state.web_playback.as_ref() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let Some(access) = state.access.as_ref() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let principal = AccessPrincipal::new(user.id, user.is_admin);
+    let stored_source = match access
+        .authorized_playback_source(principal, item_id, Some(&source.id))
+        .await
+    {
+        Ok(Some(source)) => source,
+        Ok(None) => return Err(StatusCode::NOT_FOUND),
+        Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
+    };
+    let user_id = user.id.to_string();
+    let created = service
+        .create(CreateWebPlaybackSession {
+            user_id: &user_id,
+            is_admin: user.is_admin,
+            item_id,
+            media_source_id: &source.id,
+            play_session_prefix: "lux-emby",
+            source_kind: PlaybackSourceKind::LocalFile,
+            capabilities: request.playback_capabilities_for_source(Some(source)),
+        })
+        .await
+        .map_err(emby_playback_session_error_status)?;
+    let WebPlaybackPlan::ServerHls { tier } = created.plan else {
+        let _ = service.stop(&created.id, &user_id).await;
+        return Err(StatusCode::BAD_GATEWAY);
+    };
+    let input =
+        match canonical_local_media_path(&stored_source.root_path, &stored_source.relative_path)
+            .await
+        {
+            Ok(path) => path,
+            Err(LocalPathError::Missing) => {
+                let _ = service.stop(&created.id, &user_id).await;
+                return Err(StatusCode::NOT_FOUND);
+            }
+            Err(LocalPathError::Forbidden) => {
+                let _ = service.stop(&created.id, &user_id).await;
+                return Err(StatusCode::FORBIDDEN);
+            }
+        };
+    if service.start_hls(&created.id, tier, &input).await.is_err() {
+        let _ = service.stop(&created.id, &user_id).await;
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+    Ok(Some(created))
+}
+
+fn emby_playback_session_error_status(error: WebPlaybackSessionError) -> StatusCode {
+    match error {
+        WebPlaybackSessionError::Invalid(_) => StatusCode::BAD_REQUEST,
+        WebPlaybackSessionError::NotFound => StatusCode::NOT_FOUND,
+        WebPlaybackSessionError::Expired | WebPlaybackSessionError::NotActive => StatusCode::GONE,
+        WebPlaybackSessionError::Hls(_) => StatusCode::BAD_GATEWAY,
+        WebPlaybackSessionError::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 async fn standard_emby_playback_api_key(
@@ -394,6 +788,7 @@ pub(super) async fn handle_emby_playback_event(
         .play_session_id
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("{}:{device_id}", internal_item_id));
+    let emby_transcode_session_id = emby_transcode_session_id_from_play_session(&play_session_id);
     let user_id = user.id.to_string();
     let played_percent = match database.user_played_percent(&user_id).await {
         Ok(value) => value,
@@ -466,6 +861,24 @@ pub(super) async fn handle_emby_playback_event(
                 .is_err()
             {
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+            if let Some(session_id) = emby_transcode_session_id
+                && let Some(service) = state.web_playback.as_ref()
+            {
+                let result = if state_name == "STOPPED" {
+                    service.stop(session_id, &user_id).await
+                } else {
+                    service.heartbeat(session_id, &user_id).await.map(|_| ())
+                };
+                if let Err(error) = result {
+                    tracing::warn!(
+                        event = "emby_transcoding_session_refresh_failed",
+                        session_id = %session_id,
+                        playback_state = state_name,
+                        error = %error,
+                        "failed to refresh Emby transcoding session"
+                    );
+                }
             }
             if let Some(event_type) = activity_event {
                 record_activity_event(
@@ -1028,6 +1441,243 @@ pub(super) fn web_playback_hls_url(
     ))
 }
 
+fn emby_transcoding_url(
+    service: &WebPlaybackSessionService,
+    item_id: &str,
+    source: &crate::application::catalog::CatalogSource,
+    session: &CreatedWebPlaybackSession,
+) -> Option<String> {
+    let signature = service.sign_resource(&session.id, "hls:index.m3u8", session.expires_at)?;
+    let public_item_id = emby_public_id(item_id);
+    Some(format!(
+        "/Videos/{public_item_id}/master.m3u8?MediaSourceId={}&PlaySessionId={}&luxPlaybackSessionId={}&luxPlaybackExpires={}&luxPlaybackSignature={}",
+        source.id,
+        percent_encode_filename(&session.play_session_id),
+        session.id,
+        signature.expires_at,
+        signature.signature,
+    ))
+}
+
+fn emby_transcoding_asset_url(
+    service: &WebPlaybackSessionService,
+    item_id: &str,
+    source_id: &str,
+    session_id: &str,
+    play_session_id: &str,
+    asset: &str,
+    expires_at: i64,
+) -> Option<String> {
+    let resource = format!("hls:{asset}");
+    let signature = service.sign_resource(session_id, &resource, expires_at)?;
+    Some(format!(
+        "/Videos/{}/transcoding/{session_id}/{asset}?MediaSourceId={source_id}&PlaySessionId={}&luxPlaybackExpires={}&luxPlaybackSignature={}",
+        emby_public_id(item_id),
+        percent_encode_filename(play_session_id),
+        signature.expires_at,
+        signature.signature,
+    ))
+}
+
+#[derive(Default)]
+struct EmbyTranscodingQuery {
+    media_source_id: Option<String>,
+    play_session_id: Option<String>,
+    playback_session_id: Option<String>,
+    expires: Option<i64>,
+    signature: Option<String>,
+}
+
+fn emby_transcoding_query_from_raw(raw_query: RawQuery) -> EmbyTranscodingQuery {
+    let mut query = EmbyTranscodingQuery::default();
+    let Some(raw_query) = raw_query.0 else {
+        return query;
+    };
+    for (name, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+        if query.media_source_id.is_none()
+            && (name.eq_ignore_ascii_case("MediaSourceId")
+                || name.eq_ignore_ascii_case("mediaSourceId"))
+        {
+            query.media_source_id = Some(value.into_owned());
+        } else if query.play_session_id.is_none()
+            && (name.eq_ignore_ascii_case("PlaySessionId")
+                || name.eq_ignore_ascii_case("playSessionId"))
+        {
+            query.play_session_id = Some(value.into_owned());
+        } else if query.playback_session_id.is_none()
+            && name.eq_ignore_ascii_case("luxPlaybackSessionId")
+        {
+            query.playback_session_id = Some(value.into_owned());
+        } else if query.expires.is_none() && name.eq_ignore_ascii_case("luxPlaybackExpires") {
+            query.expires = value.parse().ok();
+        } else if query.signature.is_none() && name.eq_ignore_ascii_case("luxPlaybackSignature") {
+            query.signature = Some(value.into_owned());
+        }
+    }
+    query
+}
+
+fn emby_transcoding_session_id(query: &EmbyTranscodingQuery) -> Option<&str> {
+    query
+        .playback_session_id
+        .as_deref()
+        .or_else(|| query.play_session_id.as_deref()?.strip_prefix("lux-emby:"))
+}
+
+fn emby_transcode_session_id_from_play_session(value: &str) -> Option<&str> {
+    value.strip_prefix("lux-emby:")
+}
+
+pub(super) async fn emby_transcoding_master(
+    headers: HeaderMap,
+    method: Method,
+    Path(item_id): Path<String>,
+    raw_query: RawQuery,
+    State(state): State<AppState>,
+) -> Response {
+    let query = emby_transcoding_query_from_raw(raw_query);
+    let Some(session_id) = emby_transcoding_session_id(&query) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let asset = "index.m3u8";
+    serve_emby_transcoding_asset(
+        &headers, method, &item_id, session_id, asset, &query, &state,
+    )
+    .await
+}
+
+pub(super) async fn emby_transcoding_asset(
+    headers: HeaderMap,
+    method: Method,
+    Path((item_id, session_id, asset)): Path<(String, String, String)>,
+    raw_query: RawQuery,
+    State(state): State<AppState>,
+) -> Response {
+    let query = emby_transcoding_query_from_raw(raw_query);
+    serve_emby_transcoding_asset(
+        &headers,
+        method,
+        &item_id,
+        &session_id,
+        &asset,
+        &query,
+        &state,
+    )
+    .await
+}
+
+async fn serve_emby_transcoding_asset(
+    _headers: &HeaderMap,
+    method: Method,
+    public_item_id: &str,
+    session_id: &str,
+    asset: &str,
+    query: &EmbyTranscodingQuery,
+    state: &AppState,
+) -> Response {
+    let Some(expires_at) = query.expires else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(signature) = query.signature.as_deref() else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(service) = state.web_playback.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let resource = format!("hls:{asset}");
+    let session = match service
+        .authorize_resource(session_id, &resource, expires_at, signature)
+        .await
+    {
+        Ok(session) => session,
+        Err(error) => return emby_playback_session_error_status(error).into_response(),
+    };
+    if session.plan != "SERVER_HLS"
+        || emby_internal_id(public_item_id) != session.item_id
+        || query
+            .media_source_id
+            .as_deref()
+            .is_some_and(|source_id| session.media_source_id.as_deref() != Some(source_id))
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(source_id) = session.media_source_id.as_deref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if asset == "index.m3u8" {
+        let path = match service.wait_for_hls_manifest(session_id).await {
+            Ok(path) => path,
+            Err(error) => return emby_playback_session_error_status(error).into_response(),
+        };
+        let Ok(bytes) = fs::read(path).await else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let Ok(manifest) = String::from_utf8(bytes) else {
+            return StatusCode::BAD_GATEWAY.into_response();
+        };
+        let Some(manifest) = rewrite_hls_manifest(&manifest, |asset| {
+            emby_transcoding_asset_url(
+                service,
+                &session.item_id,
+                source_id,
+                &session.id,
+                &session.play_session_id,
+                asset,
+                session.expires_at,
+            )
+        }) else {
+            return StatusCode::BAD_GATEWAY.into_response();
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Cache-Control", "private, no-store")
+            .header("Content-Type", "application/vnd.apple.mpegurl")
+            .header("Content-Length", manifest.len())
+            .body(if method == Method::HEAD {
+                Body::empty()
+            } else {
+                Body::from(manifest)
+            })
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+    let path = match service.hls_asset_path(session_id, asset).await {
+        Ok(path) => path,
+        Err(error) => return emby_playback_session_error_status(error).into_response(),
+    };
+    match service.hls_within_quota(session_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            let _ = service.stop(session_id, &session.user_id).await;
+            return StatusCode::INSUFFICIENT_STORAGE.into_response();
+        }
+        Err(error) => return emby_playback_session_error_status(error).into_response(),
+    }
+    let metadata = match fs::metadata(&path).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let content_type = if asset.ends_with(".m4s") || asset.ends_with(".mp4") {
+        "video/mp4"
+    } else {
+        "application/octet-stream"
+    };
+    let body = if method == Method::HEAD {
+        Body::empty()
+    } else {
+        let Ok(file) = fs::File::open(path).await else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        Body::from_stream(tokio_util::io::ReaderStream::new(file))
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Cache-Control", "private, no-store")
+        .header("Content-Type", content_type)
+        .header("Content-Length", metadata.len())
+        .body(body)
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
 async fn create_web_playback_session_json(
     headers: &HeaderMap,
     state: &AppState,
@@ -1050,6 +1700,7 @@ async fn create_web_playback_session_json(
             is_admin: user.is_admin,
             item_id,
             media_source_id: &source.source_id,
+            play_session_prefix: "lux-web",
             source_kind,
             capabilities,
         })
@@ -2018,5 +2669,262 @@ pub(super) async fn lux_set_played(
             StatusCode::NO_CONTENT.into_response()
         }
         Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod emby_playback_tests {
+    use super::{
+        EmbyPlaybackInfoRequest, emby_force_transcode_from_raw, parse_emby_playback_info_request,
+    };
+    use crate::application::catalog::{CatalogSource, CatalogStream};
+    use crate::application::playback::decision::{
+        PlaybackDecisionInput, PlaybackPlan, PlaybackSourceKind, ServerTier, choose_plan,
+    };
+    use axum::{body::Bytes, extract::RawQuery};
+    use std::collections::BTreeMap;
+
+    fn profile_source(container: &str, video_codec: &str, audio_codec: &str) -> CatalogSource {
+        CatalogSource {
+            id: "source-1".to_owned(),
+            source_kind: "LOCAL_FILE".to_owned(),
+            container: Some(container.to_owned()),
+            size: None,
+            external_url: None,
+            edition_name: None,
+            quality_label: None,
+            bitrate: None,
+            duration_ticks: None,
+            is_default: true,
+            probe_status: "READY".to_owned(),
+            streams: vec![
+                CatalogStream {
+                    index: 0,
+                    stream_type: "VIDEO".to_owned(),
+                    codec: Some(video_codec.to_owned()),
+                    language: None,
+                    title: None,
+                    is_external: false,
+                    is_default: true,
+                    is_forced: false,
+                    details: BTreeMap::new(),
+                },
+                CatalogStream {
+                    index: 1,
+                    stream_type: "AUDIO".to_owned(),
+                    codec: Some(audio_codec.to_owned()),
+                    language: None,
+                    title: None,
+                    is_external: false,
+                    is_default: true,
+                    is_forced: false,
+                    details: BTreeMap::new(),
+                },
+            ],
+            chapters: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn playback_info_request_selects_copy_and_transcode_tiers() {
+        let remux = parse_emby_playback_info_request(&Bytes::from_static(
+            br#"{
+                "EnableDirectPlay": false,
+                "EnableDirectStream": true,
+                "EnableTranscoding": true,
+                "AllowVideoStreamCopy": true,
+                "AllowAudioStreamCopy": true
+            }"#,
+        ))
+        .expect("valid PlaybackInfo request");
+        assert_eq!(
+            choose_plan(PlaybackDecisionInput {
+                source_kind: PlaybackSourceKind::LocalFile,
+                capabilities: remux.playback_capabilities_for_source(None),
+            }),
+            PlaybackPlan::ServerHls {
+                tier: ServerTier::Remux,
+            }
+        );
+
+        let audio_transcode = EmbyPlaybackInfoRequest {
+            enable_direct_play: Some(false),
+            enable_direct_stream: Some(true),
+            enable_transcoding: Some(true),
+            allow_video_stream_copy: Some(true),
+            allow_audio_stream_copy: Some(false),
+            ..EmbyPlaybackInfoRequest::default()
+        };
+        assert_eq!(
+            choose_plan(PlaybackDecisionInput {
+                source_kind: PlaybackSourceKind::LocalFile,
+                capabilities: audio_transcode.playback_capabilities_for_source(None),
+            }),
+            PlaybackPlan::ServerHls {
+                tier: ServerTier::AudioTranscode,
+            }
+        );
+    }
+
+    #[test]
+    fn empty_playback_info_body_keeps_direct_play_compatibility() {
+        let request = parse_emby_playback_info_request(&Bytes::new())
+            .expect("empty PlaybackInfo body is valid");
+        assert!(!request.requests_server_transcoding(false));
+    }
+
+    #[test]
+    fn transcode_flag_without_direct_play_flag_requests_server_transcoding() {
+        let request = parse_emby_playback_info_request(&Bytes::from_static(
+            br#"{
+                "EnableTranscoding": true,
+                "EnableDirectStream": false,
+                "AllowVideoStreamCopy": false,
+                "AllowAudioStreamCopy": false
+            }"#,
+        ))
+        .expect("valid PlaybackInfo request");
+        assert!(request.requests_server_transcoding(false));
+    }
+
+    #[test]
+    fn device_profile_uses_hls_when_direct_play_profile_does_not_match() {
+        let request = parse_emby_playback_info_request(&Bytes::from_static(
+            br#"{
+                "MediaSourceId": "source-1",
+                "DeviceProfile": {
+                    "DirectPlayProfiles": [{
+                        "Container": "mp4",
+                        "VideoCodec": "h264",
+                        "AudioCodec": "aac",
+                        "Type": "Video"
+                    }],
+                    "TranscodingProfiles": [{
+                        "Container": "mp4",
+                        "VideoCodec": "h264",
+                        "AudioCodec": "aac",
+                        "Protocol": "hls",
+                        "Type": "Video"
+                    }]
+                }
+            }"#,
+        ))
+        .expect("valid DeviceProfile request");
+        let source = profile_source("mkv", "hevc", "aac");
+        assert!(request.requests_server_transcoding_for_source(false, &source));
+    }
+
+    #[test]
+    fn device_profile_can_override_direct_play_flag_when_transcoding_is_enabled() {
+        let request = parse_emby_playback_info_request(&Bytes::from_static(
+            br#"{
+                "EnableDirectPlay": true,
+                "EnableDirectStream": true,
+                "EnableTranscoding": true,
+                "DeviceProfile": {
+                    "DirectPlayProfiles": [{
+                        "Container": "mp4",
+                        "VideoCodec": "h264",
+                        "AudioCodec": "aac",
+                        "Type": "Video"
+                    }],
+                    "TranscodingProfiles": [{
+                        "Protocol": "hls",
+                        "VideoCodec": "h264",
+                        "AudioCodec": "aac",
+                        "Type": "Video"
+                    }]
+                }
+            }"#,
+        ))
+        .expect("valid PlaybackInfo request");
+        let source = profile_source("mkv", "hevc", "aac");
+        assert!(request.requests_server_transcoding_for_source(false, &source));
+    }
+
+    #[test]
+    fn device_profile_disables_video_copy_for_an_incompatible_transcoding_codec() {
+        let request = parse_emby_playback_info_request(&Bytes::from_static(
+            br#"{
+                "EnableDirectPlay": true,
+                "EnableDirectStream": true,
+                "EnableTranscoding": true,
+                "AllowVideoStreamCopy": true,
+                "AllowAudioStreamCopy": true,
+                "DeviceProfile": {
+                    "DirectPlayProfiles": [{
+                        "Container": "mp4",
+                        "VideoCodec": "h264",
+                        "AudioCodec": "aac",
+                        "Type": "Video"
+                    }],
+                    "TranscodingProfiles": [{
+                        "Protocol": "hls",
+                        "VideoCodec": "h264",
+                        "AudioCodec": "aac",
+                        "Type": "Video"
+                    }]
+                }
+            }"#,
+        ))
+        .expect("valid PlaybackInfo request");
+        let source = profile_source("mkv", "hevc", "aac");
+        assert_eq!(
+            choose_plan(PlaybackDecisionInput {
+                source_kind: PlaybackSourceKind::LocalFile,
+                capabilities: request.playback_capabilities_for_source(Some(&source)),
+            }),
+            PlaybackPlan::ServerHls {
+                tier: ServerTier::HardwareTranscode,
+            }
+        );
+    }
+
+    #[test]
+    fn device_profile_keeps_direct_play_when_profile_matches() {
+        let request = parse_emby_playback_info_request(&Bytes::from_static(
+            br#"{
+                "DeviceProfile": {
+                    "DirectPlayProfiles": [{
+                        "Container": "mkv,mp4",
+                        "VideoCodec": "h264,hevc",
+                        "AudioCodec": "aac",
+                        "Type": "Video"
+                    }],
+                    "TranscodingProfiles": [{
+                        "Protocol": "hls",
+                        "Type": "Video"
+                    }]
+                }
+            }"#,
+        ))
+        .expect("valid DeviceProfile request");
+        let source = profile_source("mkv", "hevc", "aac");
+        assert!(!request.requests_server_transcoding_for_source(false, &source));
+    }
+
+    #[test]
+    fn force_transcode_query_overrides_direct_play_request() {
+        let request = parse_emby_playback_info_request(&Bytes::from_static(
+            br#"{
+                "EnableDirectPlay": true,
+                "EnableDirectStream": true
+            }"#,
+        ))
+        .expect("valid PlaybackInfo request");
+        assert!(request.requests_server_transcoding(true));
+    }
+
+    #[test]
+    fn force_transcode_query_only_accepts_true_values() {
+        assert!(emby_force_transcode_from_raw(&RawQuery(Some(
+            "forceTranscode=true".to_owned(),
+        ))));
+        assert!(emby_force_transcode_from_raw(&RawQuery(Some(
+            "ForceTranscode=1".to_owned(),
+        ))));
+        assert!(!emby_force_transcode_from_raw(&RawQuery(Some(
+            "forceTranscode=false".to_owned(),
+        ))));
     }
 }

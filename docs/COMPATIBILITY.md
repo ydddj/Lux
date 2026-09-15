@@ -14,6 +14,18 @@ Lux 主程序统一走 `ScraperPluginClient`，不再编译 TMDb client/adapter 
 
 本文档是目标客户端兼容性的唯一事实来源。未填入实测版本和证据前，不得宣称兼容。
 
+## Lux API 用户令牌与首页（2026-09-15）
+
+Lux 自有 API 的媒体、搜索、首页、图片、播放和用户状态接口接受用户级 Emby AccessToken。客户端可发送
+`X-Lux-Token`，也可兼容发送同一令牌的 `X-Emby-Token`、`X-MediaBrowser-Token` 或
+`Authorization: Bearer`。`GET /api/v1/home` 返回继续观看、推荐、可见媒体库和每库最新资源，并继续执行
+当前用户的媒体库 ACL；Web Cookie 和 LUX-182 共享管理员 API Key 的边界保持不变。
+
+自动化覆盖已加入 `tests/lux_api_auth.rs`，覆盖无凭证 401、`X-Lux-Token`、`X-Emby-Token` 和 Bearer
+调用 `/api/v1/home`/媒体库接口；本轮 `cargo test --locked --all-targets` 为 443 passed、4 ignored、0
+failed，`cargo fmt --all -- --check` 与 `git diff --check` 也通过。该证据只证明 Lux 服务端协议，不代表
+VidHub、SenPlayer、Infuse 或其他第三方客户端已经完成真实客户端兼容性验证。
+
 ## LUX-247 Emby 局域网发现（2026-09-09）
 
 Lux 服务端监听 UDP `7359`，对大小写不敏感的 `who is EmbyServer?` UTF-8/UTF-16LE 请求返回 Emby 兼容的
@@ -21,6 +33,23 @@ Lux 服务端监听 UDP `7359`，对大小写不敏感的 `who is EmbyServer?` U
 HTTP(S) 基地址；未设置时服务端按请求来源选择本机接口和 HTTP 端口。协议、地址校验、无关包过滤和关闭生命周期已有
 `tests/discovery.rs` 与 `discovery` 模块单测覆盖。该记录只证明 Lux 服务端协议，不宣称 Prism 或其他客户端已完成真实
 局域网发现；Docker 多网卡/广播验证和客户端以 `Id` 去重、并行探测两个地址的行为待 Prism 阶段验证。
+
+## LUX-254 Emby 客户端服务端转码（2026-09-15）
+
+Lux 现已把本地媒体的服务端 HLS 能力接入 Emby `PlaybackInfo` POST：当客户端明确发送
+`EnableTranscoding=true` 且 `EnableDirectPlay` 未设置或为 `false` 时，服务端按 `EnableDirectStream`、
+`AllowVideoStreamCopy` 和 `AllowAudioStreamCopy` 选择最低成本的 Remux、音频转码、硬件转码或软件转码。
+兼容 Emby 标准 `DeviceProfile` 时，Lux 会用 `DirectPlayProfiles` 匹配媒体源的容器/音视频编码；当客户端允许
+转码、直放 profile 不匹配且存在 HLS `TranscodingProfiles` 时选择服务端转码；顶层布尔值全部省略时也按此规则协商。
+HLS profile 限定视频或音频 codec 时，Lux 只复制兼容的流，否则升级到视频或音频转码档位。
+服务端返回带短期 HMAC 票据的 `TranscodingUrl`。POST 查询参数 `forceTranscode=true` 可覆盖 `EnableDirectPlay=true`；GET
+不因该参数创建转码会话。HLS 清单通过标准 `master.m3u8` 入口返回，init 和 m4s 片段使用同一转码会话的
+签名 URL；Emby 播放回调会刷新会话，`Stopped` 会回收 FFmpeg 和临时目录。
+
+`tests/playback.rs` 已覆盖 Direct Play 优先、本地转码 PlaybackInfo 协商、manifest/init/segment 实际读取、
+跨条目和篡改签名拒绝、播放回调刷新/停止清理，以及 `.strm` 不声明转码且不创建 HLS 会话。该自动化证据
+只证明服务端协议和资源边界；截至本记录，尚未用 VidHub、SenPlayer、Infuse 或其他第三方 Emby 客户端在
+部署实例上实测转码首帧、seek、暂停、停止和断线回收，不能据此宣称客户端已完成兼容。
 
 ## LUX-144 TMDb 语言组与详情回退（2026-09-08）
 

@@ -3786,6 +3786,19 @@ pub(crate) async fn require_admin(
     state: &AppState,
     require_csrf: bool,
 ) -> Result<(), Response> {
+    if users::lux_user_token_from_headers(headers).is_some()
+        && resolve_shared_admin_api_key(headers, state)
+            .await?
+            .is_none()
+    {
+        return Err(api_error(
+            headers,
+            StatusCode::FORBIDDEN,
+            lux::ApiErrorCode::PermissionDenied,
+            "客户端令牌不能调用管理员接口",
+        )
+        .into_response());
+    }
     let user = require_web_user(headers, state).await?;
     if !user.can_manage_server {
         return Err(api_error(
@@ -3796,7 +3809,7 @@ pub(crate) async fn require_admin(
         )
         .into_response());
     }
-    if require_csrf && lux_api_key_from_headers(headers).is_none() {
+    if require_csrf && !users::has_client_token(headers) {
         let Some(auth) = state.auth.as_ref() else {
             return Err(api_error(
                 headers,
@@ -3866,12 +3879,12 @@ pub(crate) async fn require_admin_web_session(
     state: &AppState,
     require_csrf: bool,
 ) -> Result<(), Response> {
-    if lux_api_key_from_headers(headers).is_some() {
+    if users::has_client_token(headers) {
         return Err(api_error(
             headers,
             StatusCode::FORBIDDEN,
             lux::ApiErrorCode::PermissionDenied,
-            "API Key 不能管理 API Key",
+            "客户端令牌不能管理 API Key",
         )
         .into_response());
     }
@@ -6481,33 +6494,7 @@ pub(crate) async fn admin_search_item_candidates(
         )
         .into_response();
     }
-    let Some(fallback_scraper) = state.scraper.as_ref().cloned() else {
-        return api_error(
-            &headers,
-            StatusCode::SERVICE_UNAVAILABLE,
-            lux::ApiErrorCode::DatabaseUnavailable,
-            "刮削器尚未配置",
-        )
-        .into_response();
-    };
-    let scraper = if let Some(resolver) = state.scraper_resolver.as_ref() {
-        match resolver.for_item(&item_id).await {
-            Ok(Some(scraper)) => ScraperProvider::from_scraper(scraper),
-            Ok(None) => fallback_scraper,
-            Err(error) => {
-                return api_error(
-                    &headers,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    lux::ApiErrorCode::DatabaseUnavailable,
-                    &format!("刮削器不可用: {error}"),
-                )
-                .into_response();
-            }
-        }
-    } else {
-        fallback_scraper
-    };
-    let Some(candidates) = state.metadata_candidates.as_ref() else {
+    let Some(metadata_reidentify) = state.metadata_reidentify.as_ref() else {
         return api_error(
             &headers,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -6516,8 +6503,8 @@ pub(crate) async fn admin_search_item_candidates(
         )
         .into_response();
     };
-    match candidates
-        .search_and_store(&item_id, &request.query, request.year, &scraper)
+    match metadata_reidentify
+        .search_item_candidates(&item_id, &request.query, request.year)
         .await
     {
         Ok(page) => {
@@ -7137,7 +7124,7 @@ pub(crate) fn metadata_candidate_error(
         MetadataCandidateError::Scraper(_) => api_error(
             headers,
             StatusCode::SERVICE_UNAVAILABLE,
-            lux::ApiErrorCode::DatabaseUnavailable,
+            lux::ApiErrorCode::PluginUnavailable,
             "刮削器暂时不可用，请稍后重试",
         )
         .into_response(),
