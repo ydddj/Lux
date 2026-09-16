@@ -39,12 +39,19 @@ HTTP(S) 基地址；未设置时服务端按请求来源选择本机接口和 HT
 Lux 现已把本地媒体的服务端 HLS 能力接入 Emby `PlaybackInfo` POST：当客户端明确发送
 `EnableTranscoding=true` 且 `EnableDirectPlay` 未设置或为 `false` 时，服务端按 `EnableDirectStream`、
 `AllowVideoStreamCopy` 和 `AllowAudioStreamCopy` 选择最低成本的 Remux、音频转码、硬件转码或软件转码。
-兼容 Emby 标准 `DeviceProfile` 时，Lux 会用 `DirectPlayProfiles` 匹配媒体源的容器/音视频编码；当客户端允许
-转码、直放 profile 不匹配且存在 HLS `TranscodingProfiles` 时选择服务端转码；顶层布尔值全部省略时也按此规则协商。
+上述播放开关兼容放在 POST URL 查询参数中，`DeviceProfile` 可放在 JSON body；这是部分第三方客户端的实际请求形式。
+兼容 Emby 标准 `DeviceProfile` 时，Lux 会用 `DirectPlayProfiles` 匹配媒体源的容器/音视频编码；当源媒体信息已知且
+确认直放 profile 不匹配，或 `MaxStreamingBitrate`（顶层或 `DeviceProfile` 内）低于已知源码率，且客户端允许转码并存在
+HLS `TranscodingProfiles` 时，才选择服务端转码。容器/codec/码率信息缺失或仍待探测时按“未知”处理，不会仅因元数据不足而
+触发转码；顶层布尔值全部省略时也按此规则协商，并按 Emby 约定将省略的开关视为启用。存在 HLS 转码 profile 的本地 source 会公开 `SupportsTranscoding=true`；实际返回
+`TranscodingUrl` 时同时将 `SupportsDirectPlay` 和 `SupportsDirectStream` 置为 `false`，避免客户端选择直放 URL。
 HLS profile 限定视频或音频 codec 时，Lux 只复制兼容的流，否则升级到视频或音频转码档位。
 服务端返回带短期 HMAC 票据的 `TranscodingUrl`。POST 查询参数 `forceTranscode=true` 可覆盖 `EnableDirectPlay=true`；GET
 不因该参数创建转码会话。HLS 清单通过标准 `master.m3u8` 入口返回，init 和 m4s 片段使用同一转码会话的
-签名 URL；Emby 播放回调会刷新会话，`Stopped` 会回收 FFmpeg 和临时目录。
+签名 URL；转码 URL 同时带有 Emby 客户端通常依赖的 `DeviceId`、输出 codec、码率、轨道索引和 fMP4 分片参数，实际
+转码 offer 将 `DirectStreamUrl` 与 `TranscodingUrl` 指向同一个签名 HLS 清单，同时保持不可直放能力位；Emby 播放回调会刷新会话，`Stopped`
+会回收 FFmpeg 和临时目录。为避免播放器把动态 HLS 清单当前已生成的片段长度当作完整片长，`PlaybackInfo` 响应顶层和每个
+`MediaSources[]` 都返回可用的 `RunTimeTicks`，优先使用选中 source 时长并回退到条目时长。Lux 自有签名参数仍保留，长期 API token 不写入转码 URL。
 
 `tests/playback.rs` 已覆盖 Direct Play 优先、本地转码 PlaybackInfo 协商、manifest/init/segment 实际读取、
 跨条目和篡改签名拒绝、播放回调刷新/停止清理，以及 `.strm` 不声明转码且不创建 HLS 会话。该自动化证据

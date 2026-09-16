@@ -106,7 +106,7 @@ Lux 的核心价值不是功能数量，而是：
 - 自动封面内置得意黑（Smiley Sans）字体用于媒体库名称和类型副标题；字体按其官方 SIL Open Font License 1.1 随项目分发，并可通过 `LUX_COVER_FONT_PATH` 指定替代字体。
 - 媒体库没有自定义封面时，扫描建立或更新索引并完成本地图片登记后，若该库已有至少 9 个带 poster 的媒体条目，系统自动注册并执行一次 `AUTO_LIBRARY_COVER` 一次性任务；该检查独立于缩略图等其他扫描后处理，服务启动时也会对已有媒体库执行一次补偿检查。任务从库中随机选择 9 张 poster，按旋转堆叠布局生成封面，并将媒体库名称及类型英文副标题绘制在封面上（电影为 `Movies`，电视剧为 `Series`，混合媒体库为 `Mixed`）。已成功生成后的任务不会因后续扫描、海报数量变化或封面删除而自动再次运行，但管理员可以在“任务与日志”中手动执行它；手动执行只会重新生成自动封面，用户上传的封面始终优先。
 - 自动封面生成前后，只要管理员上传了自定义封面，就始终以自定义封面为准，自动生成不得覆盖或替换它。
-- 每个媒体库默认实时监听文件系统；管理员可以单独关闭 `realtime_watch_enabled`，关闭后该库根目录不创建实时文件监控，但手动扫描、计划调和及外部刷新接口仍可用。新增、修改、重命名和删除事件只触发受影响路径的局部增量扫描。媒体库另有独立的 `realtime_metadata_auto_match_enabled` 开关，默认开启；关闭后，局部增量扫描仍只更新索引。开启时，局部增量扫描完成并确认有可用媒体条目时，按 `FILL_MISSING` 提交受影响条目的在线元数据补全任务。全量校验和元数据任务可独立配置计划；局部增量扫描由实时事件触发，不作为管理员可配置的计划任务。
+- 每个媒体库默认实时监听文件系统；管理员可以单独关闭 `realtime_watch_enabled`，关闭后该库根目录不创建实时文件监控，但手动扫描、计划调和及外部刷新接口仍可用。新增、修改、重命名和删除事件只触发受影响路径的局部增量扫描。媒体库另有独立的 `realtime_metadata_auto_match_enabled` 开关，默认开启；关闭后，局部增量扫描仍更新索引，并在后台仅探测本次新增或变化的本地媒体 source，不做在线元数据补全或全库探测。开启时，局部增量扫描完成并确认有可用媒体条目时，按 `FILL_MISSING` 提交受影响条目的在线元数据补全任务。`.strm` 媒体信息仍由现有定向插件探测流程处理。全量校验和元数据任务可独立配置计划；局部增量扫描由实时事件触发，不作为管理员可配置的计划任务。
 - 每个媒体库可以配置一组已安装的元数据刮削器并按顺序排序。首位固定为 `PRIMARY` 主刮削器；后续每项可标记为 `SUPPLEMENT` 补充、`BACKUP` 备用或 `BOTH` 补充兼备用。未配置时仍读取本地 NFO 和图片，但不发起在线刮削请求。主刮削器先处理本轮请求的全部能力并直接作为可信结果；若某项能力返回空、无效、不支持或重试后失败，`BACKUP` 才按顺序接管该项，已成功的其他项不重复请求。主来源尚未确认身份时，备用来源才可以参与身份匹配。身份确认后，`SUPPLEMENT` 继续请求允许的能力：单值字段只填空，多值字段去重追加，单图类型不覆盖已有图片，背景图按 URL 去重后按索引追加。不同来源的单值结果不做冲突比较、不增加人工确认；后续来源不得覆盖本地 NFO、锁定字段、更高优先级来源或已确认身份。
 - 剧集库和混合库可各自选择一个已安装、已启用且可用的片头片尾数据源；未选择表示不为该库生成或输出片头片尾标记。
   片头片尾数据源必须声明 chapters.detect 或 chapters.lookup；电影库不能选择该来源。混合库只对其中的剧集/分集参与检测。
@@ -1173,8 +1173,9 @@ inotify/notify event
   -> 建立带 dedupe_key 的持久任务
   -> 比较文件指纹
   -> 只解析变化文件
-  -> 小批量事务更新索引
-  -> 异步安排 ffprobe / NFO / 图片 / TMDb
+  -> 小批量事务更新索引并登记受影响 source/item 目标
+  -> 后台 ffprobe 只消费本次任务中新增/变化的本地 source；不探测全库或 `.strm`
+  -> 按独立策略安排本地 NFO/图片、在线元数据和定向 `.strm` 插件探测
 ~~~
 
 媒体边界示例：
@@ -1340,10 +1341,13 @@ TMDb 插件可选启用“原语言”模式。电影和剧集的标题优先使
 
 - SupportsDirectPlay = true。
 - SupportsDirectStream 按首版实际播放入口实现返回 true；本地媒体在 Emby `PlaybackInfo`
-  POST 声明 `EnableTranscoding=true` 且未启用直放、或同时声明直放/转码但由 `DeviceProfile` 判断直放
+  POST 声明 `EnableTranscoding=true` 且未启用直放、或同时声明直放/转码但由 `DeviceProfile` 确认直放
   profile 不匹配且存在 HLS 转码 profile、或携带 `forceTranscode=true` 时返回服务端转码能力；顶层布尔值
-  全部省略时也按 `DeviceProfile` 协商，`.strm` 始终返回 `SupportsTranscoding=false`。
+  全部省略时也按 `DeviceProfile` 协商。源容器或 codec 缺失/待探测时视为未知，不因此自动认定直放不兼容；
+  `.strm` 始终返回 `SupportsTranscoding=false`。
 - MediaSources 包含版本、容器、码率、大小、时长、流列表、章节和直放 URL。
+- `PlaybackInfo` 响应顶层和每个 `MediaSources[]` 返回完整 `RunTimeTicks`；优先使用选中 source 的探测时长，
+  缺失时回退到媒体项时长。HLS 清单仍保持可边转边播的动态 playlist，不通过提前写入 `ENDLIST` 冒充 VOD。
 - 每个媒体版本的章节独立返回；条目级 `Chapters` 使用默认媒体源的章节。
   `IntroStart`、`IntroEnd`、`CreditsStart` 隐藏标记映射为 Emby `ChapterInfo`。
 - `.strm` 的容器、时长和流列表可来自受限旁车或已完成的后台 STRM 探测；PlaybackInfo 请求本身不主动读取外部源，首次播放由 Lux 撷取上游响应头并返回 307，媒体内容仍由客户端直接访问最终地址。
@@ -6159,13 +6163,16 @@ FFmpeg、临时目录、并发限制、签名资源和生命周期继续由现�
   `AllowAudioStreamCopy` 的 `POST` 按客户端能力从 Direct、HLS Remux、音频转码、硬件转码和软件转码中
   选择最低成本可用档位；`EnableTranscoding=true` 且 `EnableDirectPlay` 未设置或为 `false` 时进入
   转码。客户端同时声明直放和转码时，按 Emby `DeviceProfile.DirectPlayProfiles` 匹配本地媒体源的容器和
-  音视频 codec；直放 profile 不匹配且存在 HLS `TranscodingProfiles` 时进入转码。没有顶层布尔值时也按
-  此规则协商；HLS profile 限定 codec 时，只复制兼容的流，否则进入相应的音频或视频转码档位。
+  音视频 codec；只有源信息已知且直放 profile 确认不匹配、同时存在 HLS `TranscodingProfiles` 时进入转码。
+  缺失或待探测的 source 元数据作为未知处理，不因未知值自动从 Direct 降级。没有顶层布尔值时也按此规则
+  协商；HLS profile 限定 codec 时，只复制兼容的流，否则进入相应的音频或视频转码档位。
   `forceTranscode=true` 查询参数可覆盖 `EnableDirectPlay=true`。GET 和空 body 的 POST 保持
   Direct Play 行为。
 - 本地媒体源在选择服务端转码时返回 `SupportsTranscoding=true`、`TranscodingUrl`、
   `TranscodingSubProtocol=hls`、`TranscodingContainer=mp4` 和 `TranscodingMimeType=video/mp4`。
-  URL 指向标准 Emby `master.m3u8` 入口；清单中的初始化片段和媒体片段继续使用当前会话的短期签名 URL。
+  URL 指向标准 Emby `master.m3u8` 入口，并带有 `DeviceId`、输出 codec、码率、轨道索引和 fMP4 分片参数；
+  实际转码 offer 的 `DirectStreamUrl` 与 `TranscodingUrl` 指向同一个签名 HLS 清单，同时保持
+  `SupportsDirectPlay`/`SupportsDirectStream` 为 `false`；清单中的初始化片段和媒体片段继续使用当前会话的短期签名 URL。
 - 转码会话复用 `web_playback_sessions`，其 `PlaySessionId` 可被 Emby `Sessions/Playing`、`Progress` 和
   `Stopped` 回调关联；播放/暂停刷新 TTL，停止立即回收 FFmpeg 进程和临时目录。没有回调时仍由服务端
   过期清理回收。
@@ -6186,8 +6193,8 @@ FFmpeg、临时目录、并发限制、签名资源和生命周期继续由现�
 
 验证：见 `docs/LUX-254-PLAN.md`；本机 `uname -m` 结果不外推 NAS/x86_64 性能或所有客户端兼容性。
 
-验证记录（2026-09-15）：`cargo build --locked`、`cargo test --locked --test playback`（3 个通过）、
-`cargo test --locked --lib playback`（45 个通过）和 `cargo fmt --all -- --check` 通过；转码集成测试使用
+验证记录（2026-09-16）：`cargo test --locked --test playback`（3 个通过）、
+`cargo test --locked --lib playback`（52 个通过）和 `cargo fmt --all -- --check` 通过；转码集成测试使用
 fake FFmpeg 实际读取 master manifest、init 和 m4s 片段，并验证回调刷新、停止清理、ACL、签名和 `.strm`
 边界，以及 `forceTranscode` POST 查询、GET 直放、省略 `EnableDirectPlay`、标准 Enable 标志组合、
 `DeviceProfile` 和不兼容 codec 不复制的兼容行为。`cargo test --locked --all-targets` 首次运行在并发运行时因既有
@@ -6196,6 +6203,47 @@ fake FFmpeg 实际读取 master manifest、init 和 m4s 片段，并验证回调
 `cargo clippy --locked --all-targets --all-features -- -D warnings` 仍被既有
 `tests/item_merge.rs:32` 的 `clippy::too_many_arguments` 阻塞。`uname -m` 为 `arm64`。真实 FFmpeg 和
 VidHub、SenPlayer、Infuse 等第三方客户端的首帧、seek、暂停、停止及断线回收尚未在部署实例验证。
+
+验证记录（2026-09-16 回归修复）：针对本地 source 元数据缺失/待探测时被 DeviceProfile 自动降级到服务端转码的情况，
+新增“未知不等于不兼容”协商规则和回归覆盖；`cargo build --locked`、`cargo test --locked --all-targets`
+（456 个库测试通过、4 个需 PostgreSQL 的库测试忽略，所有启用的集成目标通过）、
+`cargo test --locked --test playback`（3 个通过）、`cargo test --locked --lib playback`（46 个通过）、
+播放目标 Clippy、`cargo fmt --all -- --check` 和 `git diff --check` 通过。全量 Clippy 仍被既有
+`tests/item_merge.rs:32` 的 `clippy::too_many_arguments` 阻塞；`uname -m` 为 `arm64`。FNOS 重部署及真实第三方
+客户端播放尚未验证。
+
+验证记录（2026-09-16 增量扫描探测修复）：新增扫描回归测试，确认仅探测本次变更的 `LOCAL_FILE` source，
+未变化本地 source 与 `.strm` 均不由普通 ffprobe 处理，完成后不遗留扫描目标。`cargo build --locked`、
+`cargo test --locked --all-targets`（457 个库测试通过、4 个忽略，所有启用的集成目标通过）、
+`cargo test --locked --test scanning_jobs --test probe`（38+15 个通过）、目标 Clippy、格式检查和
+`git diff --check` 通过。全量 Clippy 仍被未修改的 `tests/item_merge.rs:32` 参数过多 lint 阻塞；`uname -m` 为
+`arm64`。FNOS 未部署本修复，现有线上 PENDING source 仍需在部署后重新触发针对性扫描验证。
+
+验证记录（2026-09-16 Emby 转码 offer 修复）：新增只提交 `DeviceProfile` 的 POST 回归，确认省略播放开关按启用
+处理、HLS profile 会公开 `SupportsTranscoding=true`，并确认实际返回 `TranscodingUrl` 时关闭 Direct Play/Direct Stream
+能力。`cargo build --locked`、`cargo test --locked --all-targets`（459 个通过、4 个需本地 PostgreSQL 的测试忽略，
+所有启用的集成目标通过）、`cargo test --locked --test playback`（3 个通过）、`cargo test --locked --lib emby_playback_tests`
+（13 个通过）、播放目标 Clippy、格式检查和 `git diff --check` 通过。全量 Clippy 仍被未修改的
+`tests/item_merge.rs:32` 参数过多 lint 阻塞；本机 `uname -m` 为 `arm64`。FNOS 新镜像及真实第三方客户端播放尚待部署后验证。
+
+验证记录（2026-09-16 Emby 码率协商修复）：根据 FNOS 最新请求仍未进入转码、而本地源已探测为约 13.9 Mbps 的证据，
+新增 `MaxStreamingBitrate` 顶层/`DeviceProfile` 解析及码率超限回归；码率超过客户端限制时不再复制视频流，改选硬件或软件
+视频转码，并输出诊断字段 `source_bitrate`、`max_streaming_bitrate` 和 `source_bitrate_exceeds_limit`。`cargo test --locked --lib
+emby_playback_tests`（14 个通过）、格式检查和 `git diff --check` 通过；FNOS 新镜像及真实第三方客户端仍需部署后验证。
+
+验证记录（2026-09-16 Harbor 转码入口兼容修复）：FNOS 日志确认 Harbor 已拿到转码 offer，Lux 也已启动本地
+H.264/AAC fMP4 HLS，但 Harbor 1.4.6 未请求 `TranscodingUrl`，而是在 `DirectStreamUrl` 为 `null` 时回退到直放路径，
+因此没有产生 HLS manifest 请求。对照 Emby 的实际转码响应后，转码 offer 现让 `DirectStreamUrl` 与 `TranscodingUrl`
+共同指向同一个签名 `master.m3u8`，并继续将两个直放能力位设为 `false`。`cargo build --locked`、
+`cargo test --locked --test playback`（3 个通过）、`cargo test --locked --lib playback`（54 个通过）、格式检查和
+`git diff --check` 通过；`cargo test --locked --all-targets` 的 462 个库测试通过，但其中两个内嵌字幕测试在该次
+全量运行中超时；随后单独运行 `cargo test --locked --lib embedded_subtitle`（3 个通过）确认模块本身通过。全量
+Clippy 仍被未修改的 `src/api/legacy.rs:44` 未使用导入阻塞。FNOS 新镜像及 Harbor 真机首帧验证尚待部署。
+
+验证记录（2026-09-16 Harbor 进度时长兼容修复）：为避免 Harbor 将实时增长的 HLS 清单长度当作媒体总时长，
+`PlaybackInfo` 现在在顶层和每个媒体源返回 `RunTimeTicks`，并在 source 时长缺失时回退到媒体项时长；详情 DTO 的
+`RunTimeTicks` 与媒体源时长也使用同一回退规则。新增转码响应回归覆盖；`cargo test --locked --test playback`
+（3 个通过）通过，其他全量质量门和 FNOS/Harbor 真机复测待完成。
 
 依赖：LUX-198、LUX-199。
 
